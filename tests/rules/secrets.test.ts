@@ -59,7 +59,7 @@ describe("secretRules", () => {
     it("detects private keys", () => {
       const file = makeFile("-----BEGIN RSA PRIVATE KEY-----\ndata\n-----END RSA PRIVATE KEY-----");
       const findings = runAllSecretRules(file);
-      expect(findings.some((f) => f.title.includes("Private key"))).toBe(true);
+      expect(findings.some((f) => f.id.includes("private-key") && f.severity === "critical")).toBe(true);
     });
 
     it("detects hardcoded passwords", () => {

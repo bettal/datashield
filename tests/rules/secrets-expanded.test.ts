@@ -89,13 +89,13 @@ describe("generic secret assignment", () => {
     expect(hasFinding(file, "generic-assignment")).toBe(false);
   });
 
-  it("ignores assignments inside fenced code blocks in markdown", () => {
+  it("still flags a real high-entropy secret inside a fenced code block", () => {
     const file = makeFile(
       '```bash\nexport api_key="xJ8kL2mN9pQ4rS7tU1vW5yZ3aB6cD0eF"\n```',
       "skill-md",
       "skills/x/SKILL.md"
     );
-    expect(hasFinding(file, "generic-assignment")).toBe(false);
+    expect(hasFinding(file, "generic-assignment")).toBe(true);
   });
 });
 

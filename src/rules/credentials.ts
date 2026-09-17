@@ -3,9 +3,7 @@ import {
   findAllMatches,
   findLineNumber,
   isTextLikeFile,
-  isMarkdownLikeFile,
   isLikelyExampleValue,
-  isInsideCodeFence,
   maskSecretValue,
 } from "./helpers.js";
 
@@ -34,6 +32,40 @@ const PLACEHOLDER_VALUES = new Set([
   "xxx",
   "******",
   "secret",
+  // Common database defaults and code type names that show up in docs.
+  "postgres",
+  "postgresql",
+  "mysql",
+  "mariadb",
+  "redis",
+  "mongo",
+  "mongodb",
+  "guest",
+]);
+
+/** Language type names / keywords that are never credentials. */
+const CODE_KEYWORDS = new Set([
+  "string",
+  "boolean",
+  "number",
+  "integer",
+  "int",
+  "long",
+  "float",
+  "double",
+  "object",
+  "array",
+  "list",
+  "map",
+  "set",
+  "null",
+  "undefined",
+  "true",
+  "false",
+  "nil",
+  "none",
+  "void",
+  "any",
 ]);
 
 const COMMON_PASSWORDS = new Set([
@@ -75,6 +107,7 @@ const CODE_PUNCTUATION = /[(){}[\]<>=,;:./\\|]/;
 function isPlausibleCredentialValue(value: string, minLength: number): boolean {
   if (value.length < minLength) return false;
   if (CODE_PUNCTUATION.test(value)) return false;
+  if (CODE_KEYWORDS.has(value.toLowerCase())) return false;
   return true;
 }
 
@@ -106,7 +139,6 @@ export const credentialRules: ReadonlyArray<Rule> = [
         if (isReferenceOrPlaceholder(password)) continue;
         if (!isPlausibleCredentialValue(password, 6)) continue;
         if (isLikelyExampleValue(file, index)) continue;
-        if (isMarkdownLikeFile(file) && isInsideCodeFence(file.content, index)) continue;
 
         const windowStart = Math.max(0, index - 200);
         const window = file.content.slice(windowStart, index);
@@ -198,7 +230,6 @@ export const credentialRules: ReadonlyArray<Rule> = [
         const password = match[1];
         if (!COMMON_PASSWORDS.has(password.toLowerCase())) continue;
         if (isLikelyExampleValue(file, index)) continue;
-        if (isMarkdownLikeFile(file) && isInsideCodeFence(file.content, index)) continue;
 
         findings.push({
           id: `credentials-weak-password-${index}`,

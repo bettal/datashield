@@ -73,13 +73,25 @@ describe("discoverConfigFiles (config-driven)", () => {
     expect(result.files.some((file) => file.path === "docs/guide.md")).toBe(true);
   });
 
-  it("honours a project config file that disables the generic scan", () => {
+  it("does not let a project config disable the generic scan", () => {
     const dir = createTempDir();
     writeFileSync(join(dir, "notes.md"), "# Notes");
     writeFileSync(join(dir, "datashield.config.json"), JSON.stringify({ genericScan: false }));
 
     const result = discoverConfigFiles(dir);
-    expect(result.files.some((file) => file.path === "notes.md")).toBe(false);
+    // Project config is additive-only: the generic scan stays enabled.
+    expect(result.files.some((file) => file.path === "notes.md")).toBe(true);
+  });
+
+  it("does not let a project config redirect discovery outside the scan root", () => {
+    const dir = createTempDir();
+    writeFileSync(
+      join(dir, "datashield.config.json"),
+      JSON.stringify({ directories: [{ path: "../../etc", type: "text-generic", recursive: true }] })
+    );
+
+    // The unsafe path is rejected by the schema, so loading throws.
+    expect(() => discoverConfigFiles(dir)).toThrow();
   });
 
   it("honours a project config file that adds a custom directory rule", () => {

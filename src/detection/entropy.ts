@@ -22,24 +22,12 @@ export function shannonEntropy(value: string): number {
   return entropy;
 }
 
-const COMMON_WORDS = [
-  "example",
-  "sample",
-  "placeholder",
-  "your_",
-  "your-",
-  "changeme",
-  "change_me",
-  "replace",
-  "dummy",
-  "foobar",
-  "lorem",
-  "ipsum",
-  "test",
-  "password",
-  "secret",
-  "token",
-];
+/**
+ * Placeholder markers matched on token boundaries, so a random secret that
+ * merely contains "test"/"token"/"secret" as a substring is not rejected.
+ */
+const COMMON_WORD_PATTERN =
+  /(?:^|[^a-z0-9])(?:example|sample|placeholder|changeme|dummy|foobar|lorem|ipsum|test|password|secret|token|replace)(?:[^a-z0-9]|$)/;
 
 /**
  * Heuristic for whether a value is a plausible high-entropy secret rather than
@@ -59,9 +47,10 @@ export function looksLikeHighEntropySecret(value: string, minLength = 20, thresh
   // Real secrets essentially always contain a digit or a symbol.
   if (/^[A-Za-z]+$/.test(trimmed)) return false;
 
-  // Reject obvious placeholder/example words.
+  // Reject obvious placeholder/example words (on token boundaries).
   const lower = trimmed.toLowerCase();
-  if (COMMON_WORDS.some((word) => lower.includes(word))) return false;
+  if (COMMON_WORD_PATTERN.test(lower)) return false;
+  if (lower.includes("your_") || lower.includes("your-")) return false;
 
   // Reject well-known non-secret shapes.
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)) {

@@ -113,7 +113,7 @@ export function isLikelyExampleValue(file: ConfigFile, matchIndex: number): bool
   if (!isMarkdownLikeFile(file)) return false;
   if (!isExampleLikePath(file)) return false;
   return (
-    hasNearbyCodeFence(file.content, matchIndex) ||
+    isInsideCodeFence(file.content, matchIndex) ||
     hasExampleOrTestContext(file.content, matchIndex)
   );
 }

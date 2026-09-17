@@ -6,8 +6,9 @@ import {
   DEFAULT_SCAN_CONFIG,
   ScanConfigError,
   loadScanConfig,
+  mergeAdditiveScanConfig,
   mergeScanConfig,
-  resolveScanConfigPaths,
+  resolveScanConfigSources,
 } from "../../src/config/scan-config.js";
 
 const tempDirs: string[] = [];
@@ -85,20 +86,39 @@ describe("mergeScanConfig", () => {
   });
 });
 
-describe("resolveScanConfigPaths", () => {
-  it("orders global, project and env override last", () => {
+describe("resolveScanConfigSources", () => {
+  it("separates trusted sources from project sources", () => {
     const scanRoot = createTempDir();
     const home = createTempDir();
     const envPath = join(createTempDir(), "explicit.json");
 
-    const paths = resolveScanConfigPaths(scanRoot, {
+    const { trusted, project } = resolveScanConfigSources(scanRoot, {
       HOME: home,
       DATASHIELD_SCAN_CONFIG: envPath,
     } as NodeJS.ProcessEnv);
 
-    expect(paths).toContain(join(home, ".config", "datashield", "scan.json"));
-    expect(paths).toContain(join(scanRoot, "datashield.config.json"));
-    expect(paths[paths.length - 1]).toBe(envPath);
+    expect(trusted).toContain(join(home, ".config", "datashield", "scan.json"));
+    expect(trusted[trusted.length - 1]).toBe(envPath);
+    expect(project).toContain(join(scanRoot, "datashield.config.json"));
+    expect(project).not.toContain(envPath);
+  });
+});
+
+describe("mergeAdditiveScanConfig", () => {
+  it("adds new targets but cannot override existing rules or toggles", () => {
+    const merged = mergeAdditiveScanConfig(DEFAULT_SCAN_CONFIG, {
+      genericScan: false,
+      ignoredDirs: ["secrets-dir"],
+      directories: [
+        { path: "skills", type: "unknown" },
+        { path: "extra", type: "text-generic", recursive: true },
+      ],
+    });
+
+    expect(merged.genericScan).toBe(DEFAULT_SCAN_CONFIG.genericScan);
+    expect(merged.ignoredDirs).not.toContain("secrets-dir");
+    expect(merged.directories.find((rule) => rule.path === "skills")?.type).toBe("skill-md");
+    expect(merged.directories.some((rule) => rule.path === "extra")).toBe(true);
   });
 });
 
@@ -113,7 +133,7 @@ describe("loadScanConfig", () => {
     expect(config.directories).toHaveLength(DEFAULT_SCAN_CONFIG.directories.length);
   });
 
-  it("merges a project override file", () => {
+  it("adds discovery targets from a project override file (additive-only)", () => {
     const scanRoot = createTempDir();
     const home = createTempDir();
     writeFileSync(
@@ -127,7 +147,43 @@ describe("loadScanConfig", () => {
     const config = loadScanConfig({ scanRoot, env: { HOME: home } as NodeJS.ProcessEnv });
 
     expect(config.directories.some((rule) => rule.path === "leaks")).toBe(true);
-    expect(config.genericScan).toBe(false);
+    // The repository-local config cannot disable the generic scan.
+    expect(config.genericScan).toBe(true);
+  });
+
+  it("does not let a project config retype an existing directory", () => {
+    const scanRoot = createTempDir();
+    const home = createTempDir();
+    writeFileSync(
+      join(scanRoot, "datashield.config.json"),
+      JSON.stringify({ directories: [{ path: "skills", type: "unknown" }] })
+    );
+
+    const config = loadScanConfig({ scanRoot, env: { HOME: home } as NodeJS.ProcessEnv });
+    expect(config.directories.find((rule) => rule.path === "skills")?.type).toBe("skill-md");
+  });
+
+  it("fails closed on unknown config keys", () => {
+    const scanRoot = createTempDir();
+    const home = createTempDir();
+    writeFileSync(join(scanRoot, "datashield.config.json"), JSON.stringify({ genericScans: false }));
+
+    expect(() =>
+      loadScanConfig({ scanRoot, env: { HOME: home } as NodeJS.ProcessEnv })
+    ).toThrow(ScanConfigError);
+  });
+
+  it("rejects project config paths that escape the scan root", () => {
+    const scanRoot = createTempDir();
+    const home = createTempDir();
+    writeFileSync(
+      join(scanRoot, "datashield.config.json"),
+      JSON.stringify({ directories: [{ path: "../../etc", type: "text-generic" }] })
+    );
+
+    expect(() =>
+      loadScanConfig({ scanRoot, env: { HOME: home } as NodeJS.ProcessEnv })
+    ).toThrow(ScanConfigError);
   });
 
   it("lets the env override win over the project file", () => {

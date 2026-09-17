@@ -1,6 +1,14 @@
-import { readFileSync, existsSync, readdirSync, readlinkSync, statSync, lstatSync } from "node:fs";
+import {
+  readFileSync,
+  existsSync,
+  readdirSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+  lstatSync,
+} from "node:fs";
 import type { Stats, Dirent } from "node:fs";
-import { join, basename, extname, relative } from "node:path";
+import { join, basename, extname, relative, isAbsolute } from "node:path";
 import type { ConfigFile, ConfigFileType, DanglingSymlink, ScanTarget } from "../types.js";
 import { isExampleLikePath } from "../source-context.js";
 import { loadScanConfig } from "../config/scan-config.js";
@@ -66,9 +74,15 @@ interface DiscoveryEnv {
   readonly rootMarkers: ReadonlySet<string>;
   readonly runtimeCompanions: ReadonlySet<string>;
   readonly extensionTypes: ReadonlyMap<string, ConfigFileType>;
+  /** Real (symlink-resolved) scan root, used for containment checks. */
+  readonly realScanRoot: string;
+  /** Real directory paths already visited by the configured-directory pass. */
+  readonly visitedConfiguredDirs: Set<string>;
+  /** Real directory paths already visited by the generic scan pass. */
+  readonly visitedGenericDirs: Set<string>;
 }
 
-function buildDiscoveryEnv(config: ScanConfig): DiscoveryEnv {
+function buildDiscoveryEnv(config: ScanConfig, realScanRoot: string): DiscoveryEnv {
   return {
     config,
     ignoredDirs: new Set(config.ignoredDirs),
@@ -78,7 +92,24 @@ function buildDiscoveryEnv(config: ScanConfig): DiscoveryEnv {
     extensionTypes: new Map(
       config.extensions.map((rule) => [rule.extension.toLowerCase(), rule.type])
     ),
+    realScanRoot,
+    visitedConfiguredDirs: new Set<string>(),
+    visitedGenericDirs: new Set<string>(),
   };
+}
+
+function safeRealpath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+/** True when `candidate` is the root or lives inside it (lexically or via realpath). */
+function isWithinRoot(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
 /**
@@ -90,7 +121,8 @@ function buildDiscoveryEnv(config: ScanConfig): DiscoveryEnv {
  * recursion), and an optional generic content scan by extension.
  */
 export function discoverConfigFiles(rootPath: string, config?: ScanConfig): ScanTarget {
-  const env = buildDiscoveryEnv(config ?? loadScanConfig({ scanRoot: rootPath }));
+  const realScanRoot = safeRealpath(rootPath);
+  const env = buildDiscoveryEnv(config ?? loadScanConfig({ scanRoot: rootPath }), realScanRoot);
   const files: ConfigFile[] = [];
   const danglingSymlinks: DanglingSymlink[] = [];
   const seenFiles = new Set<string>();
@@ -100,7 +132,7 @@ export function discoverConfigFiles(rootPath: string, config?: ScanConfig): Scan
   walkForClaudeRoots(rootPath, rootPath, claudeRoots, exampleClaudeFiles, env);
 
   for (const exampleClaudeFile of [...exampleClaudeFiles].sort()) {
-    addDiscoveredFile(rootPath, exampleClaudeFile, "claude-md", files, seenFiles);
+    addDiscoveredFile(rootPath, exampleClaudeFile, "claude-md", files, seenFiles, env);
   }
 
   for (const claudeRoot of [...claudeRoots].sort()) {
@@ -246,7 +278,7 @@ function scanClaudeRoot(
   for (const rule of env.config.files) {
     const fullPath = join(claudeRoot, rule.name);
     if (existsSync(fullPath)) {
-      addDiscoveredFile(scanRoot, fullPath, rule.type, files, seenFiles);
+      addDiscoveredFile(scanRoot, fullPath, rule.type, files, seenFiles, env);
     }
   }
 
@@ -257,8 +289,8 @@ function scanClaudeRoot(
     collectDirectoryFiles(scanRoot, dirPath, rule, files, seenFiles, danglingSymlinks, env);
   }
 
-  discoverHermesProfiles(scanRoot, claudeRoot, files, seenFiles);
-  discoverReferencedHookScripts(scanRoot, claudeRoot, files, seenFiles);
+  discoverHermesProfiles(scanRoot, claudeRoot, files, seenFiles, env);
+  discoverReferencedHookScripts(scanRoot, claudeRoot, files, seenFiles, env);
 }
 
 /**
@@ -275,6 +307,12 @@ function collectDirectoryFiles(
   danglingSymlinks: DanglingSymlink[],
   env: DiscoveryEnv
 ): void {
+  const realDir = safeRealpath(dirPath);
+  if (!isWithinRoot(env.realScanRoot, realDir)) return;
+  const visitKey = `${rule.path}\u0000${realDir}`;
+  if (env.visitedConfiguredDirs.has(visitKey)) return;
+  env.visitedConfiguredDirs.add(visitKey);
+
   const entries = safeReaddir(dirPath);
   for (const entry of entries) {
     const entryPath = join(dirPath, entry);
@@ -300,10 +338,9 @@ function collectDirectoryFiles(
     }
 
     if (!entryStat.isFile()) continue;
-    if (entryStat.size > MAX_GENERIC_FILE_BYTES) continue;
     if (rule.extensions && !rule.extensions.includes(extname(entry).toLowerCase())) continue;
 
-    addDiscoveredFile(scanRoot, entryPath, inferType(entry, rule.type), files, seenFiles);
+    addDiscoveredFile(scanRoot, entryPath, inferType(entry, rule.type), files, seenFiles, env);
   }
 }
 
@@ -323,6 +360,11 @@ function discoverGenericContent(
 ): void {
   if (!env.config.genericScan) return;
   if (!statOrNull(dirPath)?.isDirectory()) return;
+
+  const realDir = safeRealpath(dirPath);
+  if (!isWithinRoot(env.realScanRoot, realDir)) return;
+  if (env.visitedGenericDirs.has(realDir)) return;
+  env.visitedGenericDirs.add(realDir);
 
   const entries = safeReaddir(dirPath);
   for (const entry of entries) {
@@ -350,7 +392,6 @@ function discoverGenericContent(
     }
 
     if (!entryStat.isFile()) continue;
-    if (entryStat.size > MAX_GENERIC_FILE_BYTES) continue;
 
     const relativePath = toPosixPath(relative(scanRoot, entryPath));
     if (seenFiles.has(relativePath)) continue;
@@ -358,7 +399,7 @@ function discoverGenericContent(
     const type = classifyGenericFile(entry, env);
     if (type === null) continue;
 
-    addDiscoveredFile(scanRoot, entryPath, type, files, seenFiles);
+    addDiscoveredFile(scanRoot, entryPath, type, files, seenFiles, env);
   }
 }
 
@@ -381,14 +422,15 @@ function discoverHermesProfiles(
   scanRoot: string,
   claudeRoot: string,
   files: ConfigFile[],
-  seenFiles: Set<string>
+  seenFiles: Set<string>,
+  env: DiscoveryEnv
 ): void {
   const profilesDir = join(claudeRoot, "profiles");
   if (!statOrNull(profilesDir)?.isDirectory()) return;
   for (const entry of safeReaddir(profilesDir)) {
     const configPath = join(profilesDir, entry, "config.yaml");
     if (statOrNull(configPath)?.isFile()) {
-      addDiscoveredFile(scanRoot, configPath, "hermes-yaml", files, seenFiles);
+      addDiscoveredFile(scanRoot, configPath, "hermes-yaml", files, seenFiles, env);
     }
   }
 }
@@ -431,7 +473,8 @@ function discoverReferencedHookScripts(
   scanRoot: string,
   claudeRoot: string,
   files: ConfigFile[],
-  seenFiles: Set<string>
+  seenFiles: Set<string>,
+  env: DiscoveryEnv
 ): void {
   const hookConfigPaths = [
     "settings.json",
@@ -456,7 +499,7 @@ function discoverReferencedHookScripts(
     for (const candidate of extractHookReferencedPaths(content)) {
       const resolvedPath = resolveHookReferencedPath(scanRoot, claudeRoot, candidate);
       if (!resolvedPath) continue;
-      addDiscoveredFile(scanRoot, resolvedPath, inferType(resolvedPath, "hook-script"), files, seenFiles);
+      addDiscoveredFile(scanRoot, resolvedPath, inferType(resolvedPath, "hook-script"), files, seenFiles, env);
     }
   }
 }
@@ -586,10 +629,24 @@ function addDiscoveredFile(
   fullPath: string,
   type: ConfigFileType,
   files: ConfigFile[],
-  seenFiles: Set<string>
+  seenFiles: Set<string>,
+  env: DiscoveryEnv
 ): void {
   const relativePath = toPosixPath(relative(scanRoot, fullPath));
+  if (relativePath.startsWith("..") || isAbsolute(relativePath)) return;
   if (seenFiles.has(relativePath)) return;
+
+  // Containment: never follow a symlink that resolves outside the scan root.
+  let realPath: string;
+  try {
+    realPath = realpathSync(fullPath);
+  } catch {
+    return;
+  }
+  if (!isWithinRoot(env.realScanRoot, realPath)) return;
+
+  const stats = statOrNull(fullPath);
+  if (stats !== null && stats.size > MAX_GENERIC_FILE_BYTES) return;
 
   let content: string;
   try {

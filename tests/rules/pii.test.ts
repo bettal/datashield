@@ -120,6 +120,19 @@ describe("pii international identifiers", () => {
   });
 });
 
+describe("pii robustness", () => {
+  it(
+    "handles adversarial email-like input without quadratic backtracking",
+    () => {
+      const file = makeFile("a.".repeat(50000));
+      const start = Date.now();
+      run(file);
+      expect(Date.now() - start).toBeLessThan(3000);
+    },
+    10000
+  );
+});
+
 describe("pii file coverage", () => {
   it("scans skill files", () => {
     expect(has(makeFile("email: john.doe@acme-corp.io", "skill-md", "skills/x/SKILL.md"), "pii-email")).toBe(true);

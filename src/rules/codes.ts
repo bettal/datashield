@@ -69,6 +69,12 @@ export const codeRules: ReadonlyArray<Rule> = [
 
         const codes = match[1].split(/[,\s]+/).filter(Boolean);
 
+        // Require a real code list, not prose: at least three code-shaped
+        // tokens, at least one containing a digit, each of a plausible length.
+        if (codes.length < 3) continue;
+        if (!codes.some((code) => /\d/.test(code))) continue;
+        if (!codes.every((code) => code.length >= 4 && code.length <= 20)) continue;
+
         findings.push({
           id: `codes-recovery-${index}`,
           severity: "high",

@@ -10,7 +10,6 @@ import {
   hasNearbyCodeFence,
   hasExampleOrTestContext,
   isLikelyExampleValue,
-  isInsideCodeFence,
 } from "./helpers.js";
 
 /**
@@ -33,7 +32,7 @@ const SECRET_PATTERNS: ReadonlyArray<{
   },
   {
     name: "openai-legacy-api-key",
-    pattern: /sk-(?!ant-|proj-)[a-zA-Z0-9_-]{20,}/g,
+    pattern: /sk-(?!ant-|proj-|or-v1-)[a-zA-Z0-9_-]{20,}/g,
     description: "OpenAI API key",
   },
   {
@@ -70,11 +69,6 @@ const SECRET_PATTERNS: ReadonlyArray<{
     name: "aws-secret-key",
     pattern: /(?:aws_secret_access_key|secret_key)\s*[=:]\s*["']?[A-Za-z0-9/+=]{40}["']?/gi,
     description: "AWS secret access key",
-  },
-  {
-    name: "private-key",
-    pattern: /-----BEGIN\s+(RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE\s+KEY-----/g,
-    description: "Private key material",
   },
   {
     name: "hardcoded-password",
@@ -133,7 +127,7 @@ const SECRET_PATTERNS: ReadonlyArray<{
   },
   {
     name: "azure-key",
-    pattern: /[a-zA-Z0-9/+]{86}==/g,
+    pattern: /(?:AccountKey|azure[_-]?(?:storage[_-]?)?(?:account[_-]?)?key)\s*[=:]\s*["']?[a-zA-Z0-9/+]{86}==/gi,
     description: "Azure storage account key",
   },
   {
@@ -508,7 +502,7 @@ export const secretRules: ReadonlyArray<Rule> = [
             evidence: maskedValue,
             fix: {
               description: `Replace with environment variable reference`,
-              before: rawValue,
+              before: maskSecretValue(rawValue),
               after: `\${${secretPattern.name.toUpperCase().replace(/-/g, "_")}}`,
               auto: false,
             },
@@ -588,7 +582,7 @@ export const secretRules: ReadonlyArray<Rule> = [
           evidence: `${varName}=<redacted>`,
           fix: {
             description: "Move to .env file and reference via environment variable",
-            before: match[0],
+            before: match[0].replace(match[2], maskSecretValue(match[2])),
             after: `# Set ${varName} in your .env file`,
             auto: false,
           },
@@ -686,7 +680,7 @@ export const secretRules: ReadonlyArray<Rule> = [
           evidence: masked,
           fix: {
             description: "Use environment variables for credentials",
-            before: match[0].substring(0, 40),
+            before: masked,
             after: "https://${USERNAME}:${PASSWORD}@...",
             auto: false,
           },
@@ -852,10 +846,10 @@ export const secretRules: ReadonlyArray<Rule> = [
             description: `Found a ${description}. Webhook URLs contain embedded secrets and should be stored in environment variables. Anyone with this URL can post messages to the channel.`,
             file: file.path,
             line: findLineNumber(file.content, idx),
-            evidence: match[0].substring(0, 30) + "...",
+            evidence: maskSecretValue(match[0]),
             fix: {
               description: "Store webhook URL in an environment variable",
-              before: match[0].substring(0, 30),
+              before: maskSecretValue(match[0]),
               after: "${WEBHOOK_URL}",
               auto: false,
             },
@@ -983,7 +977,6 @@ export const secretRules: ReadonlyArray<Rule> = [
 
         if (value.startsWith("${") || value.startsWith("$")) continue;
         if (isLikelyExampleValue(file, idx)) continue;
-        if (isMarkdownLikeFile(file) && isInsideCodeFence(file.content, idx)) continue;
 
         // Require a genuinely random-looking value; ordinary words/paths are out.
         if (!looksLikeHighEntropySecret(value, 16, 3.0)) continue;
@@ -999,7 +992,7 @@ export const secretRules: ReadonlyArray<Rule> = [
           evidence: maskSecretValue(value),
           fix: {
             description: "Replace with an environment variable reference",
-            before: match[0],
+            before: match[0].replace(value, maskSecretValue(value)),
             after: "# reference the value from an environment variable",
             auto: false,
           },
@@ -1028,7 +1021,6 @@ export const secretRules: ReadonlyArray<Rule> = [
 
         if (!looksLikeHighEntropySecret(value, 24, 3.5)) continue;
         if (isLikelyExampleValue(file, idx)) continue;
-        if (isMarkdownLikeFile(file) && isInsideCodeFence(file.content, idx)) continue;
 
         // Skip well-known hash shapes that are not secrets.
         if (/^[a-f0-9]{40}$/i.test(value) || /^[a-f0-9]{64}$/i.test(value)) continue;

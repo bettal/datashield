@@ -3,9 +3,7 @@ import {
   findAllMatches,
   findLineNumber,
   isTextLikeFile,
-  isMarkdownLikeFile,
   isLikelyExampleValue,
-  isInsideCodeFence,
   maskSecretValue,
 } from "./helpers.js";
 import {
@@ -25,7 +23,12 @@ import {
  * checksum exists, from a nearby context label. Evidence is always masked.
  */
 
-const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
+// Bounded quantifiers avoid the quadratic backtracking of the classic
+// `[A-Za-z0-9._%+-]+@...` form on adversarial input (ReDoS). The domain must
+// start with a letter and end with an alphabetic TLD, which rejects npm-style
+// `pkg@1.2.3` and asset names like `file@2x.png`.
+const EMAIL_PATTERN =
+  /\b[A-Za-z0-9._%+-]{1,64}@[A-Za-z][A-Za-z0-9-]{0,62}(?:\.[A-Za-z0-9-]{1,63}){0,3}\.[A-Za-z]{2,24}\b/g;
 
 const PLACEHOLDER_EMAIL_LOCALS = new Set([
   "user",
@@ -39,14 +42,8 @@ const PLACEHOLDER_EMAIL_LOCALS = new Set([
   "example",
   "sample",
   "demo",
-  "admin",
-  "info",
-  "support",
   "noreply",
   "no-reply",
-  "mail",
-  "hello",
-  "dev",
 ]);
 
 const PLACEHOLDER_EMAIL_DOMAINS = [
@@ -60,15 +57,33 @@ const PLACEHOLDER_EMAIL_DOMAINS = [
   ".example",
 ];
 
+const PLACEHOLDER_EMAIL_DOMAIN_LABELS = new Set([
+  "example",
+  "test",
+  "localhost",
+  "invalid",
+  "sample",
+  "demo",
+]);
+
 function hasNearbyLabel(content: string, index: number, labels: ReadonlyArray<string>): boolean {
   const window = content.slice(Math.max(0, index - 80), index + 100).toLowerCase();
-  return labels.some((label) => window.includes(label));
+  return labels.some((label) => {
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // Word-boundary match so "inn" does not fire inside "beginning".
+    const pattern = new RegExp(
+      `(?:^|[^\\p{L}\\p{N}])${escaped}(?:[^\\p{L}\\p{N}]|$)`,
+      "u"
+    );
+    return pattern.test(window);
+  });
 }
 
 function isPlaceholderEmail(email: string): boolean {
   const [local, domain = ""] = email.toLowerCase().split("@");
   if (PLACEHOLDER_EMAIL_LOCALS.has(local)) return true;
   if (PLACEHOLDER_EMAIL_DOMAINS.some((placeholder) => domain.endsWith(placeholder))) return true;
+  if (domain.split(".").some((label) => PLACEHOLDER_EMAIL_DOMAIN_LABELS.has(label))) return true;
   // scp-like git remote, e.g. git@github.com:org/repo
   if (local === "git" && /^(?:github|gitlab|bitbucket)\.com$/.test(domain)) return true;
   return false;
@@ -113,7 +128,6 @@ export const piiRules: ReadonlyArray<Rule> = [
         const email = match[0];
         if (isPlaceholderEmail(email)) continue;
         if (isLikelyExampleValue(file, index)) continue;
-        if (isMarkdownLikeFile(file) && isInsideCodeFence(file.content, index)) continue;
 
         const [local, domain] = email.split("@");
         findings.push(
@@ -146,7 +160,6 @@ export const piiRules: ReadonlyArray<Rule> = [
       for (const match of findAllMatches(file.content, pattern)) {
         const index = match.index ?? 0;
         if (isLikelyExampleValue(file, index)) continue;
-        if (isMarkdownLikeFile(file) && isInsideCodeFence(file.content, index)) continue;
         findings.push(
           makePiiFinding({
             id: "pii-phone-ru",
@@ -178,7 +191,6 @@ export const piiRules: ReadonlyArray<Rule> = [
         const index = match.index ?? 0;
         if (match[0].startsWith("+7")) continue; // handled by pii-phone-ru
         if (isLikelyExampleValue(file, index)) continue;
-        if (isMarkdownLikeFile(file) && isInsideCodeFence(file.content, index)) continue;
         findings.push(
           makePiiFinding({
             id: "pii-phone-intl",
@@ -349,7 +361,7 @@ export const piiRules: ReadonlyArray<Rule> = [
             "american express",
             "cvv",
             "cvc",
-            " pan",
+            "pan",
             "credit",
             "карта",
             "карты",

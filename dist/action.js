@@ -12456,13 +12456,13 @@ import {
 } from "fs";
 import {
   dirname as dirname3,
-  isAbsolute,
+  isAbsolute as isAbsolute2,
   join as join7
 } from "path";
 function promotePolicyPack(options) {
   const manifest = readExportManifest(options.manifestPath);
   const entry = selectPolicyPack(manifest.packs, options.pack);
-  const sourceFile = isAbsolute(entry.file) ? entry.file : join7(dirname3(options.manifestPath), entry.file);
+  const sourceFile = isAbsolute2(entry.file) ? entry.file : join7(dirname3(options.manifestPath), entry.file);
   if (!existsSync6(sourceFile)) {
     throw new Error(`Policy file not found: ${sourceFile}`);
   }
@@ -13560,8 +13560,16 @@ import { existsSync as existsSync8 } from "fs";
 import { appendFileSync, mkdirSync as mkdirSync6, writeFileSync as writeFileSync6 } from "fs";
 
 // src/scanner/discovery.ts
-import { readFileSync as readFileSync2, existsSync as existsSync2, readdirSync, readlinkSync, statSync, lstatSync } from "fs";
-import { join as join2, basename, extname, relative } from "path";
+import {
+  readFileSync as readFileSync2,
+  existsSync as existsSync2,
+  readdirSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+  lstatSync
+} from "fs";
+import { join as join2, basename, extname, relative, isAbsolute } from "path";
 
 // src/source-context.ts
 var EXAMPLE_LIKE_SEGMENTS = [
@@ -13647,9 +13655,20 @@ var CONFIG_FILE_TYPES = [
   "unknown"
 ];
 var ConfigFileTypeSchema = external_exports.enum(CONFIG_FILE_TYPES);
+function isSafeRelativePath(value) {
+  if (value.length === 0) return false;
+  if (value.includes("\0")) return false;
+  if (value.startsWith("/") || value.startsWith("\\")) return false;
+  if (/^[A-Za-z]:[\\/]/.test(value)) return false;
+  const segments = value.split(/[\\/]/);
+  return segments.every((segment) => segment !== "..");
+}
+var safeRelativePath = (label) => external_exports.string().min(1).refine(isSafeRelativePath, {
+  message: `${label} must be a relative path inside the scan root (no absolute paths or '..')`
+});
 var DirectoryRuleSchema = external_exports.object({
   /** Directory path relative to the scan root (may contain "/"). */
-  path: external_exports.string().min(1),
+  path: safeRelativePath("path"),
   /** File type assigned to every file discovered under this directory. */
   type: ConfigFileTypeSchema,
   /** Recurse into nested subdirectories (default: false). */
@@ -13659,12 +13678,12 @@ var DirectoryRuleSchema = external_exports.object({
 });
 var FileRuleSchema = external_exports.object({
   /** Exact file name (may contain "/" for a relative path). */
-  name: external_exports.string().min(1),
+  name: safeRelativePath("name"),
   type: ConfigFileTypeSchema
 });
 var ExtensionRuleSchema = external_exports.object({
   /** File extension including the leading dot (e.g. ".md"). */
-  extension: external_exports.string().min(1),
+  extension: external_exports.string().regex(/^\.[A-Za-z0-9]+$/, 'extension must look like ".md"'),
   type: ConfigFileTypeSchema
 });
 var ScanConfigOverrideSchema = external_exports.object({
@@ -13677,7 +13696,7 @@ var ScanConfigOverrideSchema = external_exports.object({
   extensions: external_exports.array(ExtensionRuleSchema).optional(),
   genericScan: external_exports.boolean().optional(),
   genericScanExamples: external_exports.boolean().optional()
-});
+}).strict();
 var ScanConfigSchema = external_exports.object({
   version: external_exports.literal(1),
   ignoredDirs: external_exports.array(external_exports.string()),
@@ -13862,6 +13881,18 @@ function mergeByKey(base, override, key) {
   for (const item of override) byKey.set(key(item), item);
   return [...byKey.values()];
 }
+function appendNewByKey(base, extra, key) {
+  if (!extra || extra.length === 0) return [...base];
+  const seen = new Set(base.map(key));
+  const result = [...base];
+  for (const item of extra) {
+    const itemKey = key(item);
+    if (seen.has(itemKey)) continue;
+    seen.add(itemKey);
+    result.push(item);
+  }
+  return result;
+}
 function mergeScanConfig(base, override) {
   return {
     version: 1,
@@ -13869,27 +13900,52 @@ function mergeScanConfig(base, override) {
     rootMarkers: addUnique(base.rootMarkers, override.rootMarkers ?? []),
     harnessRootDirs: addUnique(base.harnessRootDirs, override.harnessRootDirs ?? []),
     files: mergeByKey(base.files, override.files, (rule) => rule.name),
-    directories: mergeByKey(
-      base.directories,
-      override.directories,
-      (rule) => `${rule.path}::${rule.type}`
-    ),
+    directories: mergeByKey(base.directories, override.directories, (rule) => rule.path),
     extensions: mergeByKey(base.extensions, override.extensions, (rule) => rule.extension),
     genericScan: override.genericScan ?? base.genericScan,
     genericScanExamples: override.genericScanExamples ?? base.genericScanExamples
   };
 }
-function resolveScanConfigPaths(scanRoot, env = process.env) {
-  const paths = [];
+function mergeAdditiveScanConfig(base, override) {
+  return {
+    version: 1,
+    ignoredDirs: [...base.ignoredDirs],
+    rootMarkers: appendNewByKey(base.rootMarkers, override.rootMarkers, (marker) => marker),
+    harnessRootDirs: appendNewByKey(base.harnessRootDirs, override.harnessRootDirs, (dir) => dir),
+    files: appendNewByKey(base.files, override.files, (rule) => rule.name),
+    directories: appendNewByKey(base.directories, override.directories, (rule) => rule.path),
+    extensions: appendNewByKey(base.extensions, override.extensions, (rule) => rule.extension),
+    genericScan: base.genericScan,
+    genericScanExamples: base.genericScanExamples
+  };
+}
+function cloneScanConfig(config) {
+  return {
+    version: 1,
+    ignoredDirs: [...config.ignoredDirs],
+    rootMarkers: [...config.rootMarkers],
+    harnessRootDirs: [...config.harnessRootDirs],
+    files: config.files.map((rule) => ({ ...rule })),
+    directories: config.directories.map((rule) => ({ ...rule })),
+    extensions: config.extensions.map((rule) => ({ ...rule })),
+    genericScan: config.genericScan,
+    genericScanExamples: config.genericScanExamples
+  };
+}
+function resolveScanConfigSources(scanRoot, env = process.env) {
   const home = env.HOME ?? env.USERPROFILE ?? homedir();
-  paths.push(join(home, ".config", "datashield", "scan.json"));
-  paths.push(join(home, ".config", "datashield", "config.json"));
-  paths.push(join(scanRoot, "datashield.config.json"));
-  paths.push(join(scanRoot, "datashield.scan.json"));
+  const trusted = [
+    join(home, ".config", "datashield", "scan.json"),
+    join(home, ".config", "datashield", "config.json")
+  ];
   if (env.DATASHIELD_SCAN_CONFIG && env.DATASHIELD_SCAN_CONFIG.trim() !== "") {
-    paths.push(resolve(env.DATASHIELD_SCAN_CONFIG));
+    trusted.push(resolve(env.DATASHIELD_SCAN_CONFIG));
   }
-  return paths;
+  const project = [
+    join(scanRoot, "datashield.config.json"),
+    join(scanRoot, "datashield.scan.json")
+  ];
+  return { trusted, project };
 }
 var ScanConfigError = class extends Error {
   constructor(message) {
@@ -13923,10 +13979,15 @@ function readOverrideFile(path) {
 }
 function loadScanConfig(options) {
   const env = options.env ?? process.env;
-  let config = DEFAULT_SCAN_CONFIG;
-  for (const path of resolveScanConfigPaths(options.scanRoot, env)) {
+  const { trusted, project } = resolveScanConfigSources(options.scanRoot, env);
+  let config = cloneScanConfig(DEFAULT_SCAN_CONFIG);
+  for (const path of trusted) {
     if (!existsSync(path)) continue;
     config = mergeScanConfig(config, readOverrideFile(path));
+  }
+  for (const path of project) {
+    if (!existsSync(path)) continue;
+    config = mergeAdditiveScanConfig(config, readOverrideFile(path));
   }
   return config;
 }
@@ -13978,7 +14039,7 @@ var PROJECT_ROOT_HOOK_VARS = /* @__PURE__ */ new Set([
   "CLAUDE_PROJECT_DIR",
   "PWD"
 ]);
-function buildDiscoveryEnv(config) {
+function buildDiscoveryEnv(config, realScanRoot) {
   return {
     config,
     ignoredDirs: new Set(config.ignoredDirs),
@@ -13987,11 +14048,26 @@ function buildDiscoveryEnv(config) {
     runtimeCompanions: new Set(CLAUDE_RUNTIME_COMPANION_NAMES),
     extensionTypes: new Map(
       config.extensions.map((rule) => [rule.extension.toLowerCase(), rule.type])
-    )
+    ),
+    realScanRoot,
+    visitedConfiguredDirs: /* @__PURE__ */ new Set(),
+    visitedGenericDirs: /* @__PURE__ */ new Set()
   };
 }
+function safeRealpath(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+function isWithinRoot(root, candidate) {
+  const rel = relative(root, candidate);
+  return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
+}
 function discoverConfigFiles(rootPath, config) {
-  const env = buildDiscoveryEnv(config ?? loadScanConfig({ scanRoot: rootPath }));
+  const realScanRoot = safeRealpath(rootPath);
+  const env = buildDiscoveryEnv(config ?? loadScanConfig({ scanRoot: rootPath }), realScanRoot);
   const files = [];
   const danglingSymlinks = [];
   const seenFiles = /* @__PURE__ */ new Set();
@@ -13999,7 +14075,7 @@ function discoverConfigFiles(rootPath, config) {
   const exampleClaudeFiles = /* @__PURE__ */ new Set();
   walkForClaudeRoots(rootPath, rootPath, claudeRoots, exampleClaudeFiles, env);
   for (const exampleClaudeFile of [...exampleClaudeFiles].sort()) {
-    addDiscoveredFile(rootPath, exampleClaudeFile, "claude-md", files, seenFiles);
+    addDiscoveredFile(rootPath, exampleClaudeFile, "claude-md", files, seenFiles, env);
   }
   for (const claudeRoot of [...claudeRoots].sort()) {
     scanClaudeRoot(rootPath, claudeRoot, files, seenFiles, danglingSymlinks, env);
@@ -14089,7 +14165,7 @@ function scanClaudeRoot(scanRoot, claudeRoot, files, seenFiles, danglingSymlinks
   for (const rule of env.config.files) {
     const fullPath = join2(claudeRoot, rule.name);
     if (existsSync2(fullPath)) {
-      addDiscoveredFile(scanRoot, fullPath, rule.type, files, seenFiles);
+      addDiscoveredFile(scanRoot, fullPath, rule.type, files, seenFiles, env);
     }
   }
   for (const rule of env.config.directories) {
@@ -14097,10 +14173,15 @@ function scanClaudeRoot(scanRoot, claudeRoot, files, seenFiles, danglingSymlinks
     if (!statOrNull(dirPath)?.isDirectory()) continue;
     collectDirectoryFiles(scanRoot, dirPath, rule, files, seenFiles, danglingSymlinks, env);
   }
-  discoverHermesProfiles(scanRoot, claudeRoot, files, seenFiles);
-  discoverReferencedHookScripts(scanRoot, claudeRoot, files, seenFiles);
+  discoverHermesProfiles(scanRoot, claudeRoot, files, seenFiles, env);
+  discoverReferencedHookScripts(scanRoot, claudeRoot, files, seenFiles, env);
 }
 function collectDirectoryFiles(scanRoot, dirPath, rule, files, seenFiles, danglingSymlinks, env) {
+  const realDir = safeRealpath(dirPath);
+  if (!isWithinRoot(env.realScanRoot, realDir)) return;
+  const visitKey = `${rule.path}\0${realDir}`;
+  if (env.visitedConfiguredDirs.has(visitKey)) return;
+  env.visitedConfiguredDirs.add(visitKey);
   const entries = safeReaddir(dirPath);
   for (const entry of entries) {
     const entryPath = join2(dirPath, entry);
@@ -14123,14 +14204,17 @@ function collectDirectoryFiles(scanRoot, dirPath, rule, files, seenFiles, dangli
       continue;
     }
     if (!entryStat.isFile()) continue;
-    if (entryStat.size > MAX_GENERIC_FILE_BYTES) continue;
     if (rule.extensions && !rule.extensions.includes(extname(entry).toLowerCase())) continue;
-    addDiscoveredFile(scanRoot, entryPath, inferType(entry, rule.type), files, seenFiles);
+    addDiscoveredFile(scanRoot, entryPath, inferType(entry, rule.type), files, seenFiles, env);
   }
 }
 function discoverGenericContent(scanRoot, dirPath, files, seenFiles, danglingSymlinks, env) {
   if (!env.config.genericScan) return;
   if (!statOrNull(dirPath)?.isDirectory()) return;
+  const realDir = safeRealpath(dirPath);
+  if (!isWithinRoot(env.realScanRoot, realDir)) return;
+  if (env.visitedGenericDirs.has(realDir)) return;
+  env.visitedGenericDirs.add(realDir);
   const entries = safeReaddir(dirPath);
   for (const entry of entries) {
     const entryPath = join2(dirPath, entry);
@@ -14154,12 +14238,11 @@ function discoverGenericContent(scanRoot, dirPath, files, seenFiles, danglingSym
       continue;
     }
     if (!entryStat.isFile()) continue;
-    if (entryStat.size > MAX_GENERIC_FILE_BYTES) continue;
     const relativePath = toPosixPath(relative(scanRoot, entryPath));
     if (seenFiles.has(relativePath)) continue;
     const type = classifyGenericFile(entry, env);
     if (type === null) continue;
-    addDiscoveredFile(scanRoot, entryPath, type, files, seenFiles);
+    addDiscoveredFile(scanRoot, entryPath, type, files, seenFiles, env);
   }
 }
 function classifyGenericFile(filename, env) {
@@ -14171,13 +14254,13 @@ function classifyGenericFile(filename, env) {
   if (ext === "") return null;
   return env.extensionTypes.get(ext) ?? null;
 }
-function discoverHermesProfiles(scanRoot, claudeRoot, files, seenFiles) {
+function discoverHermesProfiles(scanRoot, claudeRoot, files, seenFiles, env) {
   const profilesDir = join2(claudeRoot, "profiles");
   if (!statOrNull(profilesDir)?.isDirectory()) return;
   for (const entry of safeReaddir(profilesDir)) {
     const configPath = join2(profilesDir, entry, "config.yaml");
     if (statOrNull(configPath)?.isFile()) {
-      addDiscoveredFile(scanRoot, configPath, "hermes-yaml", files, seenFiles);
+      addDiscoveredFile(scanRoot, configPath, "hermes-yaml", files, seenFiles, env);
     }
   }
 }
@@ -14211,7 +14294,7 @@ function inferType(filename, defaultType) {
   if (ext === ".md" || ext === ".markdown") return defaultType;
   return "unknown";
 }
-function discoverReferencedHookScripts(scanRoot, claudeRoot, files, seenFiles) {
+function discoverReferencedHookScripts(scanRoot, claudeRoot, files, seenFiles, env) {
   const hookConfigPaths = [
     "settings.json",
     "settings.local.json",
@@ -14232,7 +14315,7 @@ function discoverReferencedHookScripts(scanRoot, claudeRoot, files, seenFiles) {
     for (const candidate of extractHookReferencedPaths(content)) {
       const resolvedPath = resolveHookReferencedPath(scanRoot, claudeRoot, candidate);
       if (!resolvedPath) continue;
-      addDiscoveredFile(scanRoot, resolvedPath, inferType(resolvedPath, "hook-script"), files, seenFiles);
+      addDiscoveredFile(scanRoot, resolvedPath, inferType(resolvedPath, "hook-script"), files, seenFiles, env);
     }
   }
 }
@@ -14323,9 +14406,19 @@ function resolveHookReferencedPath(scanRoot, claudeRoot, candidate) {
   }
   return fullPath;
 }
-function addDiscoveredFile(scanRoot, fullPath, type, files, seenFiles) {
+function addDiscoveredFile(scanRoot, fullPath, type, files, seenFiles, env) {
   const relativePath = toPosixPath(relative(scanRoot, fullPath));
+  if (relativePath.startsWith("..") || isAbsolute(relativePath)) return;
   if (seenFiles.has(relativePath)) return;
+  let realPath;
+  try {
+    realPath = realpathSync(fullPath);
+  } catch {
+    return;
+  }
+  if (!isWithinRoot(env.realScanRoot, realPath)) return;
+  const stats = statOrNull(fullPath);
+  if (stats !== null && stats.size > MAX_GENERIC_FILE_BYTES) return;
   let content;
   try {
     content = readFileSync2(fullPath, "utf-8");
@@ -14350,24 +14443,7 @@ function shannonEntropy(value) {
   }
   return entropy;
 }
-var COMMON_WORDS = [
-  "example",
-  "sample",
-  "placeholder",
-  "your_",
-  "your-",
-  "changeme",
-  "change_me",
-  "replace",
-  "dummy",
-  "foobar",
-  "lorem",
-  "ipsum",
-  "test",
-  "password",
-  "secret",
-  "token"
-];
+var COMMON_WORD_PATTERN = /(?:^|[^a-z0-9])(?:example|sample|placeholder|changeme|dummy|foobar|lorem|ipsum|test|password|secret|token|replace)(?:[^a-z0-9]|$)/;
 function looksLikeHighEntropySecret(value, minLength = 20, threshold = 3.5) {
   const trimmed = value.trim();
   if (trimmed.length < minLength) return false;
@@ -14375,7 +14451,8 @@ function looksLikeHighEntropySecret(value, minLength = 20, threshold = 3.5) {
   if (/^\d+$/.test(trimmed)) return false;
   if (/^[A-Za-z]+$/.test(trimmed)) return false;
   const lower = trimmed.toLowerCase();
-  if (COMMON_WORDS.some((word) => lower.includes(word))) return false;
+  if (COMMON_WORD_PATTERN.test(lower)) return false;
+  if (lower.includes("your_") || lower.includes("your-")) return false;
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)) {
     return false;
   }
@@ -14568,7 +14645,7 @@ function hasExampleOrTestContext(content, matchIndex) {
 function isLikelyExampleValue(file, matchIndex) {
   if (!isMarkdownLikeFile(file)) return false;
   if (!isExampleLikePath2(file)) return false;
-  return hasNearbyCodeFence(file.content, matchIndex) || hasExampleOrTestContext(file.content, matchIndex);
+  return isInsideCodeFence(file.content, matchIndex) || hasExampleOrTestContext(file.content, matchIndex);
 }
 
 // src/rules/secrets.ts
@@ -14585,7 +14662,7 @@ var SECRET_PATTERNS = [
   },
   {
     name: "openai-legacy-api-key",
-    pattern: /sk-(?!ant-|proj-)[a-zA-Z0-9_-]{20,}/g,
+    pattern: /sk-(?!ant-|proj-|or-v1-)[a-zA-Z0-9_-]{20,}/g,
     description: "OpenAI API key"
   },
   {
@@ -14622,11 +14699,6 @@ var SECRET_PATTERNS = [
     name: "aws-secret-key",
     pattern: /(?:aws_secret_access_key|secret_key)\s*[=:]\s*["']?[A-Za-z0-9/+=]{40}["']?/gi,
     description: "AWS secret access key"
-  },
-  {
-    name: "private-key",
-    pattern: /-----BEGIN\s+(RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE\s+KEY-----/g,
-    description: "Private key material"
   },
   {
     name: "hardcoded-password",
@@ -14685,7 +14757,7 @@ var SECRET_PATTERNS = [
   },
   {
     name: "azure-key",
-    pattern: /[a-zA-Z0-9/+]{86}==/g,
+    pattern: /(?:AccountKey|azure[_-]?(?:storage[_-]?)?(?:account[_-]?)?key)\s*[=:]\s*["']?[a-zA-Z0-9/+]{86}==/gi,
     description: "Azure storage account key"
   },
   {
@@ -15015,7 +15087,7 @@ var secretRules = [
             evidence: maskedValue,
             fix: {
               description: `Replace with environment variable reference`,
-              before: rawValue,
+              before: maskSecretValue(rawValue),
               after: `\${${secretPattern.name.toUpperCase().replace(/-/g, "_")}}`,
               auto: false
             }
@@ -15083,7 +15155,7 @@ var secretRules = [
           evidence: `${varName}=<redacted>`,
           fix: {
             description: "Move to .env file and reference via environment variable",
-            before: match[0],
+            before: match[0].replace(match[2], maskSecretValue(match[2])),
             after: `# Set ${varName} in your .env file`,
             auto: false
           }
@@ -15161,7 +15233,7 @@ var secretRules = [
           evidence: masked,
           fix: {
             description: "Use environment variables for credentials",
-            before: match[0].substring(0, 40),
+            before: masked,
             after: "https://${USERNAME}:${PASSWORD}@...",
             auto: false
           }
@@ -15305,10 +15377,10 @@ var secretRules = [
             description: `Found a ${description}. Webhook URLs contain embedded secrets and should be stored in environment variables. Anyone with this URL can post messages to the channel.`,
             file: file.path,
             line: findLineNumber(file.content, idx),
-            evidence: match[0].substring(0, 30) + "...",
+            evidence: maskSecretValue(match[0]),
             fix: {
               description: "Store webhook URL in an environment variable",
-              before: match[0].substring(0, 30),
+              before: maskSecretValue(match[0]),
               after: "${WEBHOOK_URL}",
               auto: false
             }
@@ -15410,7 +15482,6 @@ var secretRules = [
         const value = match[1];
         if (value.startsWith("${") || value.startsWith("$")) continue;
         if (isLikelyExampleValue(file, idx)) continue;
-        if (isMarkdownLikeFile(file) && isInsideCodeFence(file.content, idx)) continue;
         if (!looksLikeHighEntropySecret(value, 16, 3)) continue;
         findings.push({
           id: `secrets-generic-assignment-${idx}`,
@@ -15423,7 +15494,7 @@ var secretRules = [
           evidence: maskSecretValue(value),
           fix: {
             description: "Replace with an environment variable reference",
-            before: match[0],
+            before: match[0].replace(value, maskSecretValue(value)),
             after: "# reference the value from an environment variable",
             auto: false
           }
@@ -15447,7 +15518,6 @@ var secretRules = [
         const value = match[1];
         if (!looksLikeHighEntropySecret(value, 24, 3.5)) continue;
         if (isLikelyExampleValue(file, idx)) continue;
-        if (isMarkdownLikeFile(file) && isInsideCodeFence(file.content, idx)) continue;
         if (/^[a-f0-9]{40}$/i.test(value) || /^[a-f0-9]{64}$/i.test(value)) continue;
         const matchedByVendor = SECRET_PATTERNS.some(
           (secretPattern) => findAllMatches2(value, secretPattern.pattern).length > 0
@@ -15470,7 +15540,7 @@ var secretRules = [
 ];
 
 // src/rules/pii.ts
-var EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
+var EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]{1,64}@[A-Za-z][A-Za-z0-9-]{0,62}(?:\.[A-Za-z0-9-]{1,63}){0,3}\.[A-Za-z]{2,24}\b/g;
 var PLACEHOLDER_EMAIL_LOCALS = /* @__PURE__ */ new Set([
   "user",
   "username",
@@ -15483,14 +15553,8 @@ var PLACEHOLDER_EMAIL_LOCALS = /* @__PURE__ */ new Set([
   "example",
   "sample",
   "demo",
-  "admin",
-  "info",
-  "support",
   "noreply",
-  "no-reply",
-  "mail",
-  "hello",
-  "dev"
+  "no-reply"
 ]);
 var PLACEHOLDER_EMAIL_DOMAINS = [
   "example.com",
@@ -15502,14 +15566,30 @@ var PLACEHOLDER_EMAIL_DOMAINS = [
   ".test",
   ".example"
 ];
+var PLACEHOLDER_EMAIL_DOMAIN_LABELS = /* @__PURE__ */ new Set([
+  "example",
+  "test",
+  "localhost",
+  "invalid",
+  "sample",
+  "demo"
+]);
 function hasNearbyLabel(content, index, labels) {
   const window = content.slice(Math.max(0, index - 80), index + 100).toLowerCase();
-  return labels.some((label) => window.includes(label));
+  return labels.some((label) => {
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(
+      `(?:^|[^\\p{L}\\p{N}])${escaped}(?:[^\\p{L}\\p{N}]|$)`,
+      "u"
+    );
+    return pattern.test(window);
+  });
 }
 function isPlaceholderEmail(email) {
   const [local, domain = ""] = email.toLowerCase().split("@");
   if (PLACEHOLDER_EMAIL_LOCALS.has(local)) return true;
   if (PLACEHOLDER_EMAIL_DOMAINS.some((placeholder) => domain.endsWith(placeholder))) return true;
+  if (domain.split(".").some((label) => PLACEHOLDER_EMAIL_DOMAIN_LABELS.has(label))) return true;
   if (local === "git" && /^(?:github|gitlab|bitbucket)\.com$/.test(domain)) return true;
   return false;
 }
@@ -15540,7 +15620,6 @@ var piiRules = [
         const email = match[0];
         if (isPlaceholderEmail(email)) continue;
         if (isLikelyExampleValue(file, index)) continue;
-        if (isMarkdownLikeFile(file) && isInsideCodeFence(file.content, index)) continue;
         const [local, domain] = email.split("@");
         findings.push(
           makePiiFinding({
@@ -15570,7 +15649,6 @@ var piiRules = [
       for (const match of findAllMatches2(file.content, pattern)) {
         const index = match.index ?? 0;
         if (isLikelyExampleValue(file, index)) continue;
-        if (isMarkdownLikeFile(file) && isInsideCodeFence(file.content, index)) continue;
         findings.push(
           makePiiFinding({
             id: "pii-phone-ru",
@@ -15600,7 +15678,6 @@ var piiRules = [
         const index = match.index ?? 0;
         if (match[0].startsWith("+7")) continue;
         if (isLikelyExampleValue(file, index)) continue;
-        if (isMarkdownLikeFile(file) && isInsideCodeFence(file.content, index)) continue;
         findings.push(
           makePiiFinding({
             id: "pii-phone-intl",
@@ -15756,7 +15833,7 @@ var piiRules = [
           "american express",
           "cvv",
           "cvc",
-          " pan",
+          "pan",
           "credit",
           "\u043A\u0430\u0440\u0442\u0430",
           "\u043A\u0430\u0440\u0442\u044B"
@@ -15896,7 +15973,39 @@ var PLACEHOLDER_VALUES = /* @__PURE__ */ new Set([
   "todo",
   "xxx",
   "******",
-  "secret"
+  "secret",
+  // Common database defaults and code type names that show up in docs.
+  "postgres",
+  "postgresql",
+  "mysql",
+  "mariadb",
+  "redis",
+  "mongo",
+  "mongodb",
+  "guest"
+]);
+var CODE_KEYWORDS = /* @__PURE__ */ new Set([
+  "string",
+  "boolean",
+  "number",
+  "integer",
+  "int",
+  "long",
+  "float",
+  "double",
+  "object",
+  "array",
+  "list",
+  "map",
+  "set",
+  "null",
+  "undefined",
+  "true",
+  "false",
+  "nil",
+  "none",
+  "void",
+  "any"
 ]);
 var COMMON_PASSWORDS = /* @__PURE__ */ new Set([
   "123456",
@@ -15933,6 +16042,7 @@ var CODE_PUNCTUATION = /[(){}[\]<>=,;:./\\|]/;
 function isPlausibleCredentialValue(value, minLength) {
   if (value.length < minLength) return false;
   if (CODE_PUNCTUATION.test(value)) return false;
+  if (CODE_KEYWORDS.has(value.toLowerCase())) return false;
   return true;
 }
 function decodeBase64(value) {
@@ -15960,7 +16070,6 @@ var credentialRules = [
         if (isReferenceOrPlaceholder(password)) continue;
         if (!isPlausibleCredentialValue(password, 6)) continue;
         if (isLikelyExampleValue(file, index)) continue;
-        if (isMarkdownLikeFile(file) && isInsideCodeFence(file.content, index)) continue;
         const windowStart = Math.max(0, index - 200);
         const window = file.content.slice(windowStart, index);
         const loginMatches = findAllMatches2(window, LOGIN_ASSIGNMENT);
@@ -16041,7 +16150,6 @@ var credentialRules = [
         const password = match[1];
         if (!COMMON_PASSWORDS.has(password.toLowerCase())) continue;
         if (isLikelyExampleValue(file, index)) continue;
-        if (isMarkdownLikeFile(file) && isInsideCodeFence(file.content, index)) continue;
         findings.push({
           id: `credentials-weak-password-${index}`,
           severity: "medium",
@@ -16102,6 +16210,9 @@ var codeRules = [
         const index = match.index ?? 0;
         if (isLikelyExampleValue(file, index)) continue;
         const codes = match[1].split(/[,\s]+/).filter(Boolean);
+        if (codes.length < 3) continue;
+        if (!codes.some((code) => /\d/.test(code))) continue;
+        if (!codes.every((code) => code.length >= 4 && code.length <= 20)) continue;
         findings.push({
           id: `codes-recovery-${index}`,
           severity: "high",
@@ -31032,6 +31143,24 @@ function truncate3(text, max) {
   return single.length > max ? `${single.slice(0, max - 3)}...` : single;
 }
 
+// src/reporter/redact.ts
+var SENSITIVE_CATEGORIES = /* @__PURE__ */ new Set([
+  "secrets",
+  "pii",
+  "credentials",
+  "codes"
+]);
+function isSensitiveCategory(category) {
+  return SENSITIVE_CATEGORIES.has(category);
+}
+function redactSensitiveFinding(finding) {
+  if (!finding.fix || !isSensitiveCategory(finding.category)) return finding;
+  return {
+    ...finding,
+    fix: { ...finding.fix, before: maskSensitive(finding.fix.before) }
+  };
+}
+
 // src/reporter/score.ts
 var SCORE_DEDUCTIONS = {
   critical: 25,
@@ -31058,7 +31187,8 @@ function calculateScore(result) {
   return {
     timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     targetPath: target.path,
-    findings,
+    // Defense in depth: never emit a raw secret/PII value in fix metadata.
+    findings: findings.map(redactSensitiveFinding),
     score,
     summary,
     defenses,

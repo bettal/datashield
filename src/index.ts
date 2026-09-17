@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { dirname, join } from "node:path";
 import { existsSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { scan } from "./scanner/index.js";
+import { ScanConfigError } from "./config/scan-config.js";
 import { loadRulePacks } from "./rules/external.js";
 import { calculateScore } from "./reporter/score.js";
 import { renderTerminalReport } from "./reporter/terminal.js";
@@ -361,7 +362,16 @@ program
 
     // ── Phase 1: Static rule-based scan ──────────────────────
     logger.log({ level: "info", phase: "static", message: "Running static analysis" });
-    const result = scan(targetPath, { extraRules });
+    let result: ReturnType<typeof scan>;
+    try {
+      result = scan(targetPath, { extraRules });
+    } catch (error) {
+      if (error instanceof ScanConfigError) {
+        console.error(`Error: ${error.message}`);
+        process.exit(1);
+      }
+      throw error;
+    }
 
     // Filter by severity
     const filteredResult = {

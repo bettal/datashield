@@ -49,9 +49,31 @@ export const CONFIG_FILE_TYPES = [
 
 export const ConfigFileTypeSchema = z.enum(CONFIG_FILE_TYPES);
 
+/**
+ * A configured path must stay inside the scan root: reject absolute paths,
+ * Windows drive paths, NUL bytes, and any `..` segment. This blocks a
+ * repository-local config from redirecting discovery outside the scan root.
+ */
+export function isSafeRelativePath(value: string): boolean {
+  if (value.length === 0) return false;
+  if (value.includes("\0")) return false;
+  if (value.startsWith("/") || value.startsWith("\\")) return false;
+  if (/^[A-Za-z]:[\\/]/.test(value)) return false;
+  const segments = value.split(/[\\/]/);
+  return segments.every((segment) => segment !== "..");
+}
+
+const safeRelativePath = (label: string) =>
+  z
+    .string()
+    .min(1)
+    .refine(isSafeRelativePath, {
+      message: `${label} must be a relative path inside the scan root (no absolute paths or '..')`,
+    });
+
 export const DirectoryRuleSchema = z.object({
   /** Directory path relative to the scan root (may contain "/"). */
-  path: z.string().min(1),
+  path: safeRelativePath("path"),
   /** File type assigned to every file discovered under this directory. */
   type: ConfigFileTypeSchema,
   /** Recurse into nested subdirectories (default: false). */
@@ -62,27 +84,30 @@ export const DirectoryRuleSchema = z.object({
 
 export const FileRuleSchema = z.object({
   /** Exact file name (may contain "/" for a relative path). */
-  name: z.string().min(1),
+  name: safeRelativePath("name"),
   type: ConfigFileTypeSchema,
 });
 
 export const ExtensionRuleSchema = z.object({
   /** File extension including the leading dot (e.g. ".md"). */
-  extension: z.string().min(1),
+  extension: z.string().regex(/^\.[A-Za-z0-9]+$/, "extension must look like \".md\""),
   type: ConfigFileTypeSchema,
 });
 
-const ScanConfigOverrideSchema = z.object({
-  version: z.literal(1).optional(),
-  ignoredDirs: z.array(z.string()).optional(),
-  rootMarkers: z.array(z.string()).optional(),
-  harnessRootDirs: z.array(z.string()).optional(),
-  files: z.array(FileRuleSchema).optional(),
-  directories: z.array(DirectoryRuleSchema).optional(),
-  extensions: z.array(ExtensionRuleSchema).optional(),
-  genericScan: z.boolean().optional(),
-  genericScanExamples: z.boolean().optional(),
-});
+// `.strict()` so typos in override keys fail closed instead of being ignored.
+const ScanConfigOverrideSchema = z
+  .object({
+    version: z.literal(1).optional(),
+    ignoredDirs: z.array(z.string()).optional(),
+    rootMarkers: z.array(z.string()).optional(),
+    harnessRootDirs: z.array(z.string()).optional(),
+    files: z.array(FileRuleSchema).optional(),
+    directories: z.array(DirectoryRuleSchema).optional(),
+    extensions: z.array(ExtensionRuleSchema).optional(),
+    genericScan: z.boolean().optional(),
+    genericScanExamples: z.boolean().optional(),
+  })
+  .strict();
 
 export const ScanConfigSchema = z.object({
   version: z.literal(1),
@@ -301,7 +326,25 @@ function mergeByKey<T>(base: ReadonlyArray<T>, override: ReadonlyArray<T> | unde
   return [...byKey.values()];
 }
 
-/** Merge an override on top of a fully-resolved config (override wins). */
+/**
+ * Append only entries whose key is not already present. Used for
+ * repository-local (untrusted) config: it may add new discovery targets but
+ * must not override, retype, or remove existing ones.
+ */
+function appendNewByKey<T>(base: ReadonlyArray<T>, extra: ReadonlyArray<T> | undefined, key: (item: T) => string): T[] {
+  if (!extra || extra.length === 0) return [...base];
+  const seen = new Set(base.map(key));
+  const result = [...base];
+  for (const item of extra) {
+    const itemKey = key(item);
+    if (seen.has(itemKey)) continue;
+    seen.add(itemKey);
+    result.push(item);
+  }
+  return result;
+}
+
+/** Merge a trusted override on top of a fully-resolved config (override wins). */
 export function mergeScanConfig(base: ScanConfig, override: ScanConfigOverride): ScanConfig {
   return {
     version: 1,
@@ -309,14 +352,44 @@ export function mergeScanConfig(base: ScanConfig, override: ScanConfigOverride):
     rootMarkers: addUnique(base.rootMarkers, override.rootMarkers ?? []),
     harnessRootDirs: addUnique(base.harnessRootDirs, override.harnessRootDirs ?? []),
     files: mergeByKey(base.files, override.files, (rule) => rule.name),
-    directories: mergeByKey(
-      base.directories,
-      override.directories,
-      (rule) => `${rule.path}::${rule.type}`
-    ),
+    directories: mergeByKey(base.directories, override.directories, (rule) => rule.path),
     extensions: mergeByKey(base.extensions, override.extensions, (rule) => rule.extension),
     genericScan: override.genericScan ?? base.genericScan,
     genericScanExamples: override.genericScanExamples ?? base.genericScanExamples,
+  };
+}
+
+/**
+ * Merge a repository-local (untrusted) override. It is additive-only: it may
+ * add new files/directories/extensions/markers, but cannot disable the generic
+ * scan, change existing rule types, or add ignore directories. This prevents a
+ * scanned repository from silencing the scanner via its own config.
+ */
+export function mergeAdditiveScanConfig(base: ScanConfig, override: ScanConfigOverride): ScanConfig {
+  return {
+    version: 1,
+    ignoredDirs: [...base.ignoredDirs],
+    rootMarkers: appendNewByKey(base.rootMarkers, override.rootMarkers, (marker) => marker),
+    harnessRootDirs: appendNewByKey(base.harnessRootDirs, override.harnessRootDirs, (dir) => dir),
+    files: appendNewByKey(base.files, override.files, (rule) => rule.name),
+    directories: appendNewByKey(base.directories, override.directories, (rule) => rule.path),
+    extensions: appendNewByKey(base.extensions, override.extensions, (rule) => rule.extension),
+    genericScan: base.genericScan,
+    genericScanExamples: base.genericScanExamples,
+  };
+}
+
+function cloneScanConfig(config: ScanConfig): ScanConfig {
+  return {
+    version: 1,
+    ignoredDirs: [...config.ignoredDirs],
+    rootMarkers: [...config.rootMarkers],
+    harnessRootDirs: [...config.harnessRootDirs],
+    files: config.files.map((rule) => ({ ...rule })),
+    directories: config.directories.map((rule) => ({ ...rule })),
+    extensions: config.extensions.map((rule) => ({ ...rule })),
+    genericScan: config.genericScan,
+    genericScanExamples: config.genericScanExamples,
   };
 }
 
@@ -325,27 +398,47 @@ export interface ResolveScanConfigOptions {
   readonly env?: NodeJS.ProcessEnv;
 }
 
+export interface ScanConfigSources {
+  /** Operator-controlled, fully-trusted sources (may override anything). */
+  readonly trusted: ReadonlyArray<string>;
+  /** Repository-local sources (additive-only). */
+  readonly project: ReadonlyArray<string>;
+}
+
 /**
- * Candidate override paths in ascending priority order. The env override comes
- * last so it always wins.
+ * Resolve override sources. Trusted sources (global config + explicit env
+ * override) are applied with full override semantics; project sources are
+ * applied additively only.
  */
+export function resolveScanConfigSources(
+  scanRoot: string,
+  env: NodeJS.ProcessEnv = process.env
+): ScanConfigSources {
+  const home = env.HOME ?? env.USERPROFILE ?? homedir();
+
+  const trusted: string[] = [
+    join(home, ".config", "datashield", "scan.json"),
+    join(home, ".config", "datashield", "config.json"),
+  ];
+  if (env.DATASHIELD_SCAN_CONFIG && env.DATASHIELD_SCAN_CONFIG.trim() !== "") {
+    trusted.push(resolve(env.DATASHIELD_SCAN_CONFIG));
+  }
+
+  const project: string[] = [
+    join(scanRoot, "datashield.config.json"),
+    join(scanRoot, "datashield.scan.json"),
+  ];
+
+  return { trusted, project };
+}
+
+/** Flat list of candidate override paths (trusted first, project last). */
 export function resolveScanConfigPaths(
   scanRoot: string,
   env: NodeJS.ProcessEnv = process.env
 ): ReadonlyArray<string> {
-  const paths: string[] = [];
-  const home = env.HOME ?? env.USERPROFILE ?? homedir();
-
-  paths.push(join(home, ".config", "datashield", "scan.json"));
-  paths.push(join(home, ".config", "datashield", "config.json"));
-  paths.push(join(scanRoot, "datashield.config.json"));
-  paths.push(join(scanRoot, "datashield.scan.json"));
-
-  if (env.DATASHIELD_SCAN_CONFIG && env.DATASHIELD_SCAN_CONFIG.trim() !== "") {
-    paths.push(resolve(env.DATASHIELD_SCAN_CONFIG));
-  }
-
-  return paths;
+  const { trusted, project } = resolveScanConfigSources(scanRoot, env);
+  return [...trusted, ...project];
 }
 
 export class ScanConfigError extends Error {
@@ -391,11 +484,19 @@ function readOverrideFile(path: string): ScanConfigOverride {
  */
 export function loadScanConfig(options: ResolveScanConfigOptions): ScanConfig {
   const env = options.env ?? process.env;
-  let config = DEFAULT_SCAN_CONFIG;
+  const { trusted, project } = resolveScanConfigSources(options.scanRoot, env);
 
-  for (const path of resolveScanConfigPaths(options.scanRoot, env)) {
+  let config = cloneScanConfig(DEFAULT_SCAN_CONFIG);
+
+  for (const path of trusted) {
     if (!existsSync(path)) continue;
     config = mergeScanConfig(config, readOverrideFile(path));
+  }
+
+  // Repository-local config is untrusted: additive-only.
+  for (const path of project) {
+    if (!existsSync(path)) continue;
+    config = mergeAdditiveScanConfig(config, readOverrideFile(path));
   }
 
   return config;

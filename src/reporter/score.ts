@@ -1,6 +1,7 @@
 import type { Finding, Grade, ReportSummary, SecurityReport, SecurityScore, ScoreBreakdown } from "../types.js";
 import type { ScanResult } from "../scanner/index.js";
 import { detectDefenses } from "./defenses.js";
+import { redactSensitiveFinding } from "./redact.js";
 
 const SCORE_DEDUCTIONS: Record<string, number> = {
   critical: 25,
@@ -65,7 +66,8 @@ export function calculateScore(result: ScanResult): SecurityReport {
   return {
     timestamp: new Date().toISOString(),
     targetPath: target.path,
-    findings,
+    // Defense in depth: never emit a raw secret/PII value in fix metadata.
+    findings: findings.map(redactSensitiveFinding),
     score,
     summary,
     defenses,
