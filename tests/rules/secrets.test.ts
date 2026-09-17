@@ -320,11 +320,17 @@ describe("secretRules", () => {
       expect(claudeMdFindings).toHaveLength(0);
     });
 
-    it("skips non-CLAUDE.md files", () => {
-      const file = makeFile("API_KEY=real-secret-here-1234", "settings-json");
+    it("skips non-text file types", () => {
+      const file = makeFile("API_KEY=real-secret-here-1234", "hook-code");
       const findings = runAllSecretRules(file);
       const claudeMdFindings = findings.filter((f) => f.id.includes("claude-md-env"));
       expect(claudeMdFindings).toHaveLength(0);
+    });
+
+    it("scans broader text-like types such as settings-json", () => {
+      const file = makeFile("API_KEY=real-secret-here-1234", "settings-json");
+      const findings = runAllSecretRules(file);
+      expect(findings.some((f) => f.id.includes("claude-md-env"))).toBe(true);
     });
 
     it("skips non-sensitive variable names", () => {
@@ -370,8 +376,14 @@ describe("secretRules", () => {
       expect(findings.some((f) => f.id.includes("url-credentials"))).toBe(false);
     });
 
-    it("does not flag non-agent files", () => {
+    it("flags URL credentials in non-agent config files too", () => {
       const file: ConfigFile = { path: "mcp.json", type: "mcp-json", content: "https://admin:pass@host.com" };
+      const findings = runAllSecretRules(file);
+      expect(findings.some((f) => f.id.includes("url-credentials"))).toBe(true);
+    });
+
+    it("does not flag non-text files", () => {
+      const file: ConfigFile = { path: "hook.ts", type: "hook-code", content: "https://admin:pass@host.com" };
       const findings = runAllSecretRules(file);
       expect(findings.some((f) => f.id.includes("url-credentials"))).toBe(false);
     });
@@ -420,8 +432,14 @@ describe("secretRules", () => {
       expect(findings.some((f) => f.id.includes("cred-file-ref"))).toBe(true);
     });
 
-    it("does not flag non-agent files", () => {
+    it("flags credential-file references in non-agent config files too", () => {
       const file: ConfigFile = { path: "mcp.json", type: "mcp-json", content: "~/.aws/credentials" };
+      const findings = runAllSecretRules(file);
+      expect(findings.some((f) => f.id.includes("cred-file-ref"))).toBe(true);
+    });
+
+    it("does not flag non-text files", () => {
+      const file: ConfigFile = { path: "hook.ts", type: "hook-code", content: "~/.aws/credentials" };
       const findings = runAllSecretRules(file);
       expect(findings.some((f) => f.id.includes("cred-file-ref"))).toBe(false);
     });

@@ -33,6 +33,9 @@ const CategorySchema = z.enum([
   "exposure",
   "exfiltration",
   "misconfiguration",
+  "pii",
+  "credentials",
+  "codes",
 ]);
 
 const RulePackEntrySchema = z.object({

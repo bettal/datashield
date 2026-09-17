@@ -1,5 +1,8 @@
 import type { Rule } from "../types.js";
 import { secretRules } from "./secrets.js";
+import { piiRules } from "./pii.js";
+import { credentialRules } from "./credentials.js";
+import { codeRules } from "./codes.js";
 import { permissionRules } from "./permissions.js";
 import { hookRules } from "./hooks.js";
 import { mcpRules } from "./mcp.js";
@@ -24,6 +27,9 @@ import { harnessRules } from "./harnesses.js";
 export function getBuiltinRules(): ReadonlyArray<Rule> {
   return [
     ...secretRules,
+    ...piiRules,
+    ...credentialRules,
+    ...codeRules,
     ...permissionRules,
     ...hookRules,
     ...mcpRules,

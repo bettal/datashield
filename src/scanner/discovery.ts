@@ -1,5 +1,5 @@
 import { readFileSync, existsSync, readdirSync, readlinkSync, statSync, lstatSync } from "node:fs";
-import type { Stats } from "node:fs";
+import type { Stats, Dirent } from "node:fs";
 import { join, basename, extname, relative } from "node:path";
 import type { ConfigFile, ConfigFileType, DanglingSymlink, ScanTarget } from "../types.js";
 import { isExampleLikePath } from "../source-context.js";
@@ -124,6 +124,24 @@ function statOrNull(path: string): Stats | null {
   }
 }
 
+const MAX_GENERIC_FILE_BYTES = 5_000_000;
+
+function safeReaddir(dirPath: string): ReadonlyArray<string> {
+  try {
+    return readdirSync(dirPath);
+  } catch {
+    return [];
+  }
+}
+
+function safeReaddirDirents(dirPath: string): ReadonlyArray<Dirent> {
+  try {
+    return readdirSync(dirPath, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+
 function isDanglingSymlink(path: string): boolean {
   try {
     return lstatSync(path).isSymbolicLink();
@@ -164,7 +182,7 @@ function walkForClaudeRoots(
 ): void {
   if (!statOrNull(dirPath)?.isDirectory()) return;
 
-  const entries = readdirSync(dirPath, { withFileTypes: true });
+  const entries = safeReaddirDirents(dirPath);
   for (const entry of entries) {
     if (entry.isDirectory()) {
       if (env.ignoredDirs.has(entry.name)) continue;
@@ -257,7 +275,7 @@ function collectDirectoryFiles(
   danglingSymlinks: DanglingSymlink[],
   env: DiscoveryEnv
 ): void {
-  const entries = readdirSync(dirPath);
+  const entries = safeReaddir(dirPath);
   for (const entry of entries) {
     const entryPath = join(dirPath, entry);
     const entryStat = statOrNull(entryPath);
@@ -282,6 +300,7 @@ function collectDirectoryFiles(
     }
 
     if (!entryStat.isFile()) continue;
+    if (entryStat.size > MAX_GENERIC_FILE_BYTES) continue;
     if (rule.extensions && !rule.extensions.includes(extname(entry).toLowerCase())) continue;
 
     addDiscoveredFile(scanRoot, entryPath, inferType(entry, rule.type), files, seenFiles);
@@ -305,7 +324,7 @@ function discoverGenericContent(
   if (!env.config.genericScan) return;
   if (!statOrNull(dirPath)?.isDirectory()) return;
 
-  const entries = readdirSync(dirPath);
+  const entries = safeReaddir(dirPath);
   for (const entry of entries) {
     const entryPath = join(dirPath, entry);
     const entryStat = statOrNull(entryPath);
@@ -331,6 +350,7 @@ function discoverGenericContent(
     }
 
     if (!entryStat.isFile()) continue;
+    if (entryStat.size > MAX_GENERIC_FILE_BYTES) continue;
 
     const relativePath = toPosixPath(relative(scanRoot, entryPath));
     if (seenFiles.has(relativePath)) continue;
@@ -365,7 +385,7 @@ function discoverHermesProfiles(
 ): void {
   const profilesDir = join(claudeRoot, "profiles");
   if (!statOrNull(profilesDir)?.isDirectory()) return;
-  for (const entry of readdirSync(profilesDir)) {
+  for (const entry of safeReaddir(profilesDir)) {
     const configPath = join(profilesDir, entry, "config.yaml");
     if (statOrNull(configPath)?.isFile()) {
       addDiscoveredFile(scanRoot, configPath, "hermes-yaml", files, seenFiles);
@@ -426,7 +446,13 @@ function discoverReferencedHookScripts(
     const fullPath = join(claudeRoot, relativeConfigPath);
     if (!statOrNull(fullPath)?.isFile()) continue;
 
-    const content = readFileSync(fullPath, "utf-8");
+    let content: string;
+    try {
+      content = readFileSync(fullPath, "utf-8");
+    } catch {
+      continue;
+    }
+
     for (const candidate of extractHookReferencedPaths(content)) {
       const resolvedPath = resolveHookReferencedPath(scanRoot, claudeRoot, candidate);
       if (!resolvedPath) continue;
@@ -565,7 +591,14 @@ function addDiscoveredFile(
   const relativePath = toPosixPath(relative(scanRoot, fullPath));
   if (seenFiles.has(relativePath)) return;
 
-  const content = readFileSync(fullPath, "utf-8");
+  let content: string;
+  try {
+    content = readFileSync(fullPath, "utf-8");
+  } catch {
+    // Unreadable (permissions, race, binary) — skip rather than abort the scan.
+    return;
+  }
+
   files.push({ path: relativePath, type, content });
   seenFiles.add(relativePath);
 }

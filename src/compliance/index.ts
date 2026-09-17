@@ -40,6 +40,9 @@ const CONTROL_MAP: Readonly<
     exposure: [{ id: "CC6.1", title: "Logical access security" }],
     exfiltration: [{ id: "CC6.7", title: "Restricted data transmission" }],
     misconfiguration: [{ id: "CC7.1", title: "Detection of security events" }],
+    pii: [{ id: "CC6.1", title: "Logical access security" }, { id: "CC6.7", title: "Restricted data transmission" }],
+    credentials: [{ id: "CC6.1", title: "Logical access - credentials" }, { id: "CC6.3", title: "Access credentials managed" }],
+    codes: [{ id: "CC6.1", title: "Logical access security" }, { id: "CC6.3", title: "Access credentials managed" }],
   },
   pci: {
     secrets: [{ id: "Req 3", title: "Protect stored account data" }, { id: "Req 8", title: "Identify and authenticate access" }],
@@ -52,6 +55,9 @@ const CONTROL_MAP: Readonly<
     exposure: [{ id: "Req 3", title: "Protect stored account data" }],
     exfiltration: [{ id: "Req 4", title: "Protect data in transmission" }, { id: "Req 1", title: "Network security controls" }],
     misconfiguration: [{ id: "Req 2", title: "Secure configurations" }],
+    pii: [{ id: "Req 3", title: "Protect stored account data" }, { id: "Req 4", title: "Protect data in transmission" }],
+    credentials: [{ id: "Req 8", title: "Identify and authenticate access" }],
+    codes: [{ id: "Req 8", title: "Identify and authenticate access" }],
   },
   iso: {
     secrets: [{ id: "A.5.17", title: "Authentication information" }, { id: "A.8.24", title: "Use of cryptography" }],
@@ -64,6 +70,9 @@ const CONTROL_MAP: Readonly<
     exposure: [{ id: "A.8.12", title: "Data leakage prevention" }],
     exfiltration: [{ id: "A.8.12", title: "Data leakage prevention" }],
     misconfiguration: [{ id: "A.8.9", title: "Configuration management" }],
+    pii: [{ id: "A.5.34", title: "Privacy and protection of PII" }, { id: "A.8.12", title: "Data leakage prevention" }],
+    credentials: [{ id: "A.5.17", title: "Authentication information" }],
+    codes: [{ id: "A.5.17", title: "Authentication information" }],
   },
 };
 

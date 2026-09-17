@@ -20,9 +20,19 @@ src/
   scanner/
     discovery.ts    # File discovery (CLAUDE.md, settings.json, mcp.json, agents/, etc.)
     index.ts        # Orchestrates discovery → rules → sorted findings
+  config/
+    scan-config.ts  # Config-driven scan configuration (files, dirs, extensions, toggles)
+  detection/
+    entropy.ts      # Shannon entropy + high-entropy secret heuristic
+    mask.ts         # Safe redaction (never leaks short values)
+    validators.ts   # Luhn, IBAN mod-97, СНИЛС/ИНН/ОГРН checksums, SSN plausibility
   rules/
     index.ts        # Barrel export of all rule modules
-    secrets.ts      # 10 rules — API keys, tokens, passwords, env exposure, webhooks, private keys, base64, internal IPs
+    helpers.ts      # Shared match/line/file/example-suppression helpers
+    secrets.ts      # 13 rules — vendor keys/tokens, generic assignments, high-entropy, env exposure, webhooks, private keys, base64, internal IPs
+    pii.ts          # 11 rules — email, phones (RF/intl), СНИЛС, ИНН, ОГРН, passport/license, cards, IBAN, BIK/account, SSN
+    credentials.ts  # 3 rules — login/password pairs, HTTP Basic auth, weak passwords
+    codes.ts        # 3 rules — OTP/2FA, recovery/backup codes, PINs
     permissions.ts  # 10 rules — allow/deny analysis, dangerous flags, destructive git, mutable tools, sensitive paths, network access
     hooks.ts        # 34 rules — injection, exfiltration, persistence, container escape, clipboard, log tampering, reverse shells
     mcp.ts          # 23 rules — risky servers, env override, npx supply chain, auto-approve, timeout, bind-all, CORS

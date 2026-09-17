@@ -193,7 +193,11 @@ function mapToScoreCategory(category: string): string {
     agents: "agents",
     injection: "agents",    // prompt injection → agents category
     exposure: "hooks",      // data exposure via hooks/exfiltration
+    exfiltration: "secrets", // outbound data loss → secrets/data-exposure
     misconfiguration: "permissions",  // config issues → permissions
+    pii: "secrets",         // personal data is data exposure
+    credentials: "secrets", // logins/passwords are data exposure
+    codes: "secrets",       // one-time codes are data exposure
   };
   return mapping[category] ?? "agents";
 }

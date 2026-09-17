@@ -46,7 +46,10 @@ export type FindingCategory =
   | "injection"
   | "exposure"
   | "exfiltration"
-  | "misconfiguration";
+  | "misconfiguration"
+  | "pii"
+  | "credentials"
+  | "codes";
 
 // ─── Fix Suggestion ────────────────────────────────────────
 

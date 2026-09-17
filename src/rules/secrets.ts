@@ -1,5 +1,17 @@
 import type { ConfigFile, Finding, Rule } from "../types.js";
-import { isExampleLikePath as isExampleLikePathString } from "../source-context.js";
+import { looksLikeHighEntropySecret, shannonEntropy } from "../detection/index.js";
+import {
+  findLineNumber,
+  findAllMatches,
+  maskSecretValue,
+  isTextLikeFile,
+  isMarkdownLikeFile,
+  isExampleLikePath,
+  hasNearbyCodeFence,
+  hasExampleOrTestContext,
+  isLikelyExampleValue,
+  isInsideCodeFence,
+} from "./helpers.js";
 
 /**
  * Secret detection patterns.
@@ -76,7 +88,7 @@ const SECRET_PATTERNS: ReadonlyArray<{
   },
   {
     name: "connection-string",
-    pattern: /(?:mongodb|postgres|mysql|redis):\/\/[^\s"']+:[^\s"']+@/gi,
+    pattern: /(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql|mariadb|redis|rediss|amqp|amqps):\/\/[^\s"']+:[^\s"']+@/gi,
     description: "Database connection string with credentials",
   },
   {
@@ -144,21 +156,232 @@ const SECRET_PATTERNS: ReadonlyArray<{
     pattern: /dop_v1_[a-f0-9]{64}/g,
     description: "DigitalOcean personal access token",
   },
+  {
+    name: "digitalocean-oauth",
+    pattern: /doo_v1_[a-f0-9]{64}/g,
+    description: "DigitalOcean OAuth token",
+  },
+  {
+    name: "gitlab-pat",
+    pattern: /glpat-[a-zA-Z0-9_-]{20}/g,
+    description: "GitLab personal access token",
+  },
+  {
+    name: "gitlab-runner-token",
+    pattern: /glrt-[a-zA-Z0-9_-]{20}/g,
+    description: "GitLab runner token",
+  },
+  {
+    name: "gitlab-pipeline-token",
+    pattern: /glptt-[a-zA-Z0-9_-]{20}/g,
+    description: "GitLab pipeline trigger token",
+  },
+  {
+    name: "github-oauth",
+    pattern: /gho_[a-zA-Z0-9]{36}/g,
+    description: "GitHub OAuth token",
+  },
+  {
+    name: "github-app-token",
+    pattern: /(?:ghu|ghs)_[a-zA-Z0-9]{36}/g,
+    description: "GitHub App token",
+  },
+  {
+    name: "github-refresh-token",
+    pattern: /ghr_[a-zA-Z0-9]{36}/g,
+    description: "GitHub refresh token",
+  },
+  {
+    name: "bitbucket-token",
+    pattern: /ATBB[a-zA-Z0-9]{28,}/g,
+    description: "Bitbucket access token",
+  },
+  {
+    name: "shopify-access-token",
+    pattern: /shpat_[a-f0-9]{32}/g,
+    description: "Shopify access token",
+  },
+  {
+    name: "shopify-shared-secret",
+    pattern: /shpss_[a-f0-9]{32}/g,
+    description: "Shopify shared secret",
+  },
+  {
+    name: "square-access-token",
+    pattern: /sq0atp-[a-zA-Z0-9_-]{22}/g,
+    description: "Square access token",
+  },
+  {
+    name: "square-oauth-secret",
+    pattern: /sq0csp-[a-zA-Z0-9_-]{43}/g,
+    description: "Square OAuth secret",
+  },
+  {
+    name: "paypal-braintree-token",
+    pattern: /access_token\$production\$[a-z0-9]{16}\$[a-f0-9]{32}/g,
+    description: "PayPal/Braintree access token",
+  },
+  {
+    name: "telegram-bot-token",
+    pattern: /\b\d{8,10}:AA[A-Za-z0-9_-]{33}\b/g,
+    description: "Telegram bot token",
+  },
+  {
+    name: "firebase-cloud-messaging-key",
+    pattern: /AAAA[A-Za-z0-9_-]{7}:[A-Za-z0-9_-]{140}/g,
+    description: "Firebase Cloud Messaging key",
+  },
+  {
+    name: "supabase-service-role",
+    pattern: /sbp_[a-f0-9]{40}/g,
+    description: "Supabase service role token",
+  },
+  {
+    name: "vercel-token",
+    pattern: /vercel_[a-zA-Z0-9]{24}/g,
+    description: "Vercel token",
+  },
+  {
+    name: "netlify-token",
+    pattern: /nfp_[a-zA-Z0-9]{40}/g,
+    description: "Netlify personal access token",
+  },
+  {
+    name: "railway-token",
+    pattern: /railway_[a-zA-Z0-9]{36}/g,
+    description: "Railway token",
+  },
+  {
+    name: "planetscale-token",
+    pattern: /pscale_tkn_[a-zA-Z0-9_]{43}/g,
+    description: "PlanetScale token",
+  },
+  {
+    name: "gcp-oauth-token",
+    pattern: /ya29\.[a-zA-Z0-9_-]{20,}/g,
+    description: "Google OAuth access token",
+  },
+  {
+    name: "gcp-oauth-client-secret",
+    pattern: /GOCSPX-[a-zA-Z0-9_-]{28}/g,
+    description: "Google OAuth client secret",
+  },
+  {
+    name: "azure-storage-account-key",
+    pattern: /AccountKey=[A-Za-z0-9+/=]{86,}/g,
+    description: "Azure Storage account key",
+  },
+  {
+    name: "azure-sas-token",
+    pattern: /[?&]sig=[A-Za-z0-9%+/=]{40,}/g,
+    description: "Azure SAS token",
+  },
+  {
+    name: "newrelic-api-key",
+    pattern: /NRAK-[A-Z0-9]{27}/g,
+    description: "New Relic API key",
+  },
+  {
+    name: "sentry-dsn",
+    pattern: /https:\/\/[a-f0-9]{32}@[a-z0-9.-]+\/\d+/g,
+    description: "Sentry DSN",
+  },
+  {
+    name: "pypi-token",
+    pattern: /pypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}/g,
+    description: "PyPI upload token",
+  },
+  {
+    name: "doppler-token",
+    pattern: /dp\.pt\.[a-zA-Z0-9]{43}/g,
+    description: "Doppler token",
+  },
+  {
+    name: "onepassword-token",
+    pattern: /ops_[a-zA-Z0-9]{20,}/g,
+    description: "1Password service token",
+  },
+  {
+    name: "groq-api-key",
+    pattern: /gsk_[a-zA-Z0-9]{52}/g,
+    description: "Groq API key",
+  },
+  {
+    name: "perplexity-api-key",
+    pattern: /pplx-[a-zA-Z0-9]{48}/g,
+    description: "Perplexity API key",
+  },
+  {
+    name: "replicate-token",
+    pattern: /r8_[a-zA-Z0-9]{37}/g,
+    description: "Replicate API token",
+  },
+  {
+    name: "dropbox-token",
+    pattern: /sl\.[a-zA-Z0-9_-]{130,}/g,
+    description: "Dropbox access token",
+  },
+  {
+    name: "mailgun-key",
+    pattern: /key-[a-f0-9]{32}/g,
+    description: "Mailgun API key",
+  },
+  {
+    name: "facebook-access-token",
+    pattern: /EAACEdEose0cBA[A-Za-z0-9]+/g,
+    description: "Facebook access token",
+  },
+  {
+    name: "notion-token",
+    pattern: /(?:ntn_[a-zA-Z0-9]{40,}|secret_[a-zA-Z0-9]{40,})/g,
+    description: "Notion integration token",
+  },
+  {
+    name: "openrouter-api-key",
+    pattern: /sk-or-v1-[a-f0-9]{64}/g,
+    description: "OpenRouter API key",
+  },
+  {
+    name: "anthropic-admin-key",
+    pattern: /sk-ant-admin[a-zA-Z0-9_-]{20,}/g,
+    description: "Anthropic admin API key",
+  },
+  {
+    name: "stripe-restricted-key",
+    pattern: /rk_(?:live|test)_[a-zA-Z0-9]{24,}/g,
+    description: "Stripe restricted API key",
+  },
+  {
+    name: "twilio-account-sid",
+    pattern: /AC[a-f0-9]{32}/g,
+    description: "Twilio account SID",
+  },
+  {
+    name: "sendinblue-key",
+    pattern: /xkeysib-[a-f0-9]{64}-[a-zA-Z0-9]{16}/g,
+    description: "Brevo (Sendinblue) API key",
+  },
+  {
+    name: "age-secret-key",
+    pattern: /AGE-SECRET-KEY-1[A-Z0-9]{58}/g,
+    description: "age encryption secret key",
+  },
+  {
+    name: "encrypted-private-key",
+    pattern: /-----BEGIN ENCRYPTED PRIVATE KEY-----/g,
+    description: "Encrypted private key material",
+  },
+  {
+    name: "aws-session-token",
+    pattern: /\bASIA[0-9A-Z]{16}\b/g,
+    description: "AWS temporary session access key",
+  },
+  {
+    name: "cloudinary-credentials",
+    pattern: /cloudinary:\/\/\d+:[A-Za-z0-9_-]+@[a-z0-9-]+/g,
+    description: "Cloudinary credentials URL",
+  },
 ];
-
-function findLineNumber(content: string, matchIndex: number): number {
-  return content.substring(0, matchIndex).split("\n").length;
-}
-
-function findAllMatches(content: string, pattern: RegExp): Array<RegExpMatchArray> {
-  const flags = pattern.flags.includes("g") ? pattern.flags : pattern.flags + "g";
-  return [...content.matchAll(new RegExp(pattern.source, flags))];
-}
-
-function maskSecretValue(value: string): string {
-  if (value.length <= 12) return value;
-  return value.substring(0, 8) + "..." + value.substring(value.length - 4);
-}
 
 function extractDelimitedToken(content: string, startIndex: number): string {
   let endIndex = startIndex;
@@ -171,50 +394,6 @@ function extractDelimitedToken(content: string, startIndex: number): string {
   }
 
   return content.slice(startIndex, endIndex).replace(/[.,;:]+$/, "");
-}
-
-function isMarkdownLikeFile(file: ConfigFile): boolean {
-  return [
-    "claude-md",
-    "agent-md",
-    "skill-md",
-    "command-md",
-    "agents-md",
-    "rule-md",
-    "context-md",
-  ].includes(file.type);
-}
-
-function isExampleLikePath(file: ConfigFile): boolean {
-  return isExampleLikePathString(file.path);
-}
-
-function hasNearbyCodeFence(content: string, matchIndex: number): boolean {
-  const windowStart = Math.max(0, matchIndex - 800);
-  const windowEnd = Math.min(content.length, matchIndex + 800);
-  const window = content.slice(windowStart, windowEnd);
-  return /```|~~~~/.test(window);
-}
-
-function hasExampleOrTestContext(content: string, matchIndex: number): boolean {
-  const windowStart = Math.max(0, matchIndex - 1200);
-  const windowEnd = Math.min(content.length, matchIndex + 400);
-  const window = content.slice(windowStart, windowEnd).toLowerCase();
-
-  return [
-    "example",
-    "sample",
-    "fixture",
-    "test(",
-    "shouldbe",
-    "returns invalid",
-    "returns valid",
-    " passed",
-    " failed",
-    "funspec",
-    "stringspec",
-    "behaviorspec",
-  ].some((marker) => window.includes(marker));
 }
 
 function isLikelyMarkdownExamplePassword(
@@ -381,7 +560,7 @@ export const secretRules: ReadonlyArray<Rule> = [
     severity: "high",
     category: "secrets",
     check(file: ConfigFile): ReadonlyArray<Finding> {
-      if (file.type !== "claude-md") return [];
+      if (!isTextLikeFile(file)) return [];
 
       const findings: Finding[] = [];
 
@@ -478,7 +657,7 @@ export const secretRules: ReadonlyArray<Rule> = [
     severity: "high",
     category: "secrets",
     check(file: ConfigFile): ReadonlyArray<Finding> {
-      if (file.type !== "agent-md" && file.type !== "claude-md") return [];
+      if (!isTextLikeFile(file)) return [];
 
       const findings: Finding[] = [];
 
@@ -524,7 +703,7 @@ export const secretRules: ReadonlyArray<Rule> = [
     severity: "high",
     category: "secrets",
     check(file: ConfigFile): ReadonlyArray<Finding> {
-      if (file.type !== "agent-md" && file.type !== "claude-md") return [];
+      if (!isTextLikeFile(file)) return [];
 
       const findings: Finding[] = [];
 
@@ -694,8 +873,8 @@ export const secretRules: ReadonlyArray<Rule> = [
     severity: "medium",
     category: "secrets",
     check(file: ConfigFile): ReadonlyArray<Finding> {
-      // Only check agent definitions and CLAUDE.md where base64 payloads would be injected
-      if (file.type !== "agent-md" && file.type !== "claude-md") return [];
+      // Check any text-like surface where base64 payloads could be embedded.
+      if (!isTextLikeFile(file)) return [];
 
       const findings: Finding[] = [];
 
@@ -779,6 +958,97 @@ export const secretRules: ReadonlyArray<Rule> = [
             },
           });
         }
+      }
+
+      return findings;
+    },
+  },
+  {
+    id: "secrets-generic-assignment",
+    name: "Generic Secret Assignment",
+    description: "Detects credential-like values assigned to secret-named keys without a known vendor prefix",
+    severity: "high",
+    category: "secrets",
+    check(file: ConfigFile): ReadonlyArray<Finding> {
+      if (!isTextLikeFile(file)) return [];
+
+      const findings: Finding[] = [];
+
+      const assignmentPattern =
+        /(?:api[_-]?key|apikey|secret[_-]?key|client[_-]?secret|access[_-]?key|auth[_-]?token|encryption[_-]?key|signing[_-]?key|private[_-]?key|secret|token)\s*[=:]\s*["']?([A-Za-z0-9_\-./+=]{16,})["']?/gi;
+
+      for (const match of findAllMatches(file.content, assignmentPattern)) {
+        const idx = match.index ?? 0;
+        const value = match[1];
+
+        if (value.startsWith("${") || value.startsWith("$")) continue;
+        if (isLikelyExampleValue(file, idx)) continue;
+        if (isMarkdownLikeFile(file) && isInsideCodeFence(file.content, idx)) continue;
+
+        // Require a genuinely random-looking value; ordinary words/paths are out.
+        if (!looksLikeHighEntropySecret(value, 16, 3.0)) continue;
+
+        findings.push({
+          id: `secrets-generic-assignment-${idx}`,
+          severity: "high",
+          category: "secrets",
+          title: "Credential-like value assigned to a secret key",
+          description: `Found a high-entropy value assigned to a secret-named key in ${file.path}. Values like this are usually API keys, tokens, or client secrets that should come from environment variables or a secret manager.`,
+          file: file.path,
+          line: findLineNumber(file.content, idx),
+          evidence: maskSecretValue(value),
+          fix: {
+            description: "Replace with an environment variable reference",
+            before: match[0],
+            after: "# reference the value from an environment variable",
+            auto: false,
+          },
+        });
+      }
+
+      return findings;
+    },
+  },
+  {
+    id: "secrets-high-entropy",
+    name: "High-Entropy String",
+    description: "Detects long random-looking strings that may be unlabelled secrets",
+    severity: "medium",
+    category: "secrets",
+    check(file: ConfigFile): ReadonlyArray<Finding> {
+      if (!isTextLikeFile(file)) return [];
+
+      const findings: Finding[] = [];
+
+      const quotedPattern = /["'`]([A-Za-z0-9+/=_-]{24,})["'`]/g;
+
+      for (const match of findAllMatches(file.content, quotedPattern)) {
+        const idx = match.index ?? 0;
+        const value = match[1];
+
+        if (!looksLikeHighEntropySecret(value, 24, 3.5)) continue;
+        if (isLikelyExampleValue(file, idx)) continue;
+        if (isMarkdownLikeFile(file) && isInsideCodeFence(file.content, idx)) continue;
+
+        // Skip well-known hash shapes that are not secrets.
+        if (/^[a-f0-9]{40}$/i.test(value) || /^[a-f0-9]{64}$/i.test(value)) continue;
+
+        // Skip values already caught by a vendor-specific pattern.
+        const matchedByVendor = SECRET_PATTERNS.some(
+          (secretPattern) => findAllMatches(value, secretPattern.pattern).length > 0
+        );
+        if (matchedByVendor) continue;
+
+        findings.push({
+          id: `secrets-high-entropy-${idx}`,
+          severity: "medium",
+          category: "secrets",
+          title: `High-entropy string (${value.length} chars, ${shannonEntropy(value).toFixed(1)} bits/char)`,
+          description: `Found a long high-entropy string in ${file.path}. It does not match a known key format but has the statistical profile of a secret. Verify whether it is a credential and move it to an environment variable if so.`,
+          file: file.path,
+          line: findLineNumber(file.content, idx),
+          evidence: maskSecretValue(value),
+        });
       }
 
       return findings;

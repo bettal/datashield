@@ -41,7 +41,9 @@ data-leak classes that upstream does not cover.
 | One-time codes | OTP/TOTP/2FA, verification codes, recovery/backup codes, PINs |
 | Inherited | permission misconfigs, hook injection, MCP server risk, agent prompt-injection surface |
 
-> Detection classes marked *in progress* are being implemented in the roadmap below.
+> All detection classes above are implemented. Precision comes from checksum
+> validators (Luhn, IBAN mod-97, СНИЛС/ИНН/ОГРН control digits), a vendor-prefix
+> catalogue, Shannon-entropy scoring, and context/code-fence suppression.
 > The inherited agent-security engine is fully present and tested.
 
 ## Quick Start
@@ -139,11 +141,11 @@ Rules are modules exporting `ReadonlyArray<Rule>`; each rule has
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Config-driven discovery, recursion, generic scan, rebrand | done |
-| 1 | Secret detection: provider catalog + high-entropy generic secrets | planned |
-| 2 | PII module (RF + international) with validators (Luhn, INN/SNILS checksum) | planned |
-| 3 | Credentials module (login/password pairs, Basic auth, `.env`) | planned |
-| 4 | One-time codes module (OTP/TOTP/2FA/recovery/PIN) | planned |
-| 5 | Scoring/reporting tuning for new categories, rebrand cleanup | planned |
+| 1 | Secret detection: provider catalogue + high-entropy generic secrets | done |
+| 2 | PII module (RF + international) with validators (Luhn, INN/SNILS checksum) | done |
+| 3 | Credentials module (login/password pairs, Basic auth, `.env`) | done |
+| 4 | One-time codes module (OTP/TOTP/2FA/recovery/PIN) | done |
+| 5 | Scoring/reporting for new categories, precision tuning | done |
 
 ## Attribution
 
