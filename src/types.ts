@@ -94,6 +94,10 @@ export type ConfigFileType =
   | "hermes-yaml"
   | "harness-json"
   | "plugin-manifest"
+  | "markdown-generic"
+  | "text-generic"
+  | "env-file"
+  | "config-generic"
   | "unknown";
 
 // ─── Scanner Rule ──────────────────────────────────────────

@@ -1,6 +1,7 @@
-# AgentShield
+# DataShield
 
-Security auditor for AI agent configurations (Claude Code, MCP servers, hooks, agents).
+Data-leak auditor for AI agent configurations (Claude Code, OpenCode, MCP servers, hooks, agents).
+Finds secrets, personal data (RF + international), credentials, keys, and one-time codes.
 
 ## Build & Test
 
@@ -68,13 +69,23 @@ Grades: A (>=90), B (>=75), C (>=60), D (>=40), F (<40)
 ## CLI
 
 ```bash
-agentshield scan [path]              # Static analysis
-agentshield scan --opus              # + Claude Opus adversarial pipeline
-agentshield scan --format json|md    # Output format
-agentshield scan --fix               # Show auto-fix suggestions
-agentshield miniclaw start           # Launch MiniClaw secure agent server
-agentshield miniclaw start --port N  # Custom port
+datashield scan [path]              # Static analysis
+datashield scan --opus              # + Claude Opus adversarial pipeline
+datashield scan --format json|md    # Output format
+datashield scan --fix               # Show auto-fix suggestions
+datashield miniclaw start           # Launch MiniClaw secure agent server
+datashield miniclaw start --port N  # Custom port
 ```
+
+## Scan configuration (config-driven discovery)
+
+Discovery is config-driven: every scan resolves the effective `ScanConfig`
+before reading any file. Resolution order (low → high priority):
+`DEFAULT_SCAN_CONFIG` → `~/.config/datashield/scan.json` →
+`<scanRoot>/datashield.config.json` → `$DATASHIELD_SCAN_CONFIG`.
+The config is re-read on every scan, so it can change at runtime.
+See `src/config/scan-config.ts`. `genericScan` (recursive arbitrary
+markdown/text/env/config discovery) is on by default.
 
 ## Testing
 

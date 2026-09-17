@@ -1,10 +1,10 @@
 {
-  "name": "ecc-agentshield",
+  "name": "datashield",
   "version": "1.6.0",
-  "description": "Security auditor for AI agent configurations. Scans Claude Code setups for vulnerabilities, misconfigs, and injection risks.",
+  "description": "Data-leak auditor for AI agent configurations. Scans agent setups for secrets, personal data, credentials, keys, and one-time codes.",
   "type": "module",
   "bin": {
-    "agentshield": "./dist/index.js"
+    "datashield": "./dist/index.js"
   },
   "exports": {
     ".": {
@@ -48,11 +48,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/affaan-m/agentshield.git"
+    "url": "git+https://github.com/bettal/datashield.git"
   },
-  "homepage": "https://github.com/affaan-m/agentshield#readme",
+  "homepage": "https://github.com/bettal/datashield#readme",
   "bugs": {
-    "url": "https://github.com/affaan-m/agentshield/issues"
+    "url": "https://github.com/bettal/datashield/issues"
   },
   "files": [
     "dist/",

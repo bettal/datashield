@@ -224,8 +224,8 @@ const program = new Command();
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"] as const;
 
 program
-  .name("agentshield")
-  .description("Security auditor for AI agent configurations")
+  .name("datashield")
+  .description("Data-leak auditor for AI agent configurations: secrets, personal data, credentials, keys, and one-time codes")
   .version("1.6.0");
 
 function emitReportOutput(output: string, outputPath: string | undefined): void {

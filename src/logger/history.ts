@@ -36,6 +36,9 @@ const HISTORY_FILE = "history.json";
  * Allows override via environment variable for testing.
  */
 function getAgentShieldDir(): string {
+  if (process.env.DATASHIELD_HOME) {
+    return process.env.DATASHIELD_HOME;
+  }
   if (process.env.AGENTSHIELD_HOME) {
     return process.env.AGENTSHIELD_HOME;
   }

@@ -1,5 +1,5 @@
-name: "AgentShield Security Scan"
-description: "Scan Claude Code configurations for security issues"
+name: "DataShield Data-Leak Scan"
+description: "Scan AI agent configurations for secrets, personal data, credentials, keys, and one-time codes"
 author: "affaan-m"
 
 branding:
