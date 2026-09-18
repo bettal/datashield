@@ -113,7 +113,7 @@ function makePiiFinding(input: PiiFindingInput): Finding {
     title: input.title,
     description: input.description,
     file: input.file.path,
-    line: findLineNumber(input.file.content, input.index),
+    line: findLineNumber(input.file, input.index),
     evidence: input.evidence,
   };
 }

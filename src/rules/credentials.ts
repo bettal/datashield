@@ -162,7 +162,7 @@ export const credentialRules: ReadonlyArray<Rule> = [
           title: "Login/password pair found",
           description: `Found a login ("${login}") and password assigned together in ${file.path}. Hardcoded credential pairs grant direct account access and must be moved to a secret manager.`,
           file: file.path,
-          line: findLineNumber(file.content, index),
+          line: findLineNumber(file, index),
           evidence: `login=${maskSecretValue(login)} password=${maskSecretValue(password)}`,
           fix: {
             description: "Move credentials to environment variables or a secret manager",
@@ -207,7 +207,7 @@ export const credentialRules: ReadonlyArray<Rule> = [
           title: "HTTP Basic auth credentials found",
           description: `Found a decodable HTTP Basic auth header in ${file.path}. Base64 is not encryption — the login and password are exposed in plain text to anyone who reads the file.`,
           file: file.path,
-          line: findLineNumber(file.content, index),
+          line: findLineNumber(file, index),
           evidence: `login=${maskSecretValue(login)} password=${maskSecretValue(password)}`,
           fix: {
             description: "Remove the header and load credentials at runtime",
@@ -248,7 +248,7 @@ export const credentialRules: ReadonlyArray<Rule> = [
           title: "Weak password found",
           description: `Found a commonly used weak password in ${file.path}. Weak credentials are trivially guessed and should be replaced with a strong, unique secret.`,
           file: file.path,
-          line: findLineNumber(file.content, index),
+          line: findLineNumber(file, index),
           evidence: `password=${maskSecretValue(password)}`,
         });
       }

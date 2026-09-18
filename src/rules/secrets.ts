@@ -498,7 +498,7 @@ export const secretRules: ReadonlyArray<Rule> = [
             title: `Hardcoded ${secretPattern.description}`,
             description: `Found ${secretPattern.description} in ${file.path}. Secrets must never be hardcoded in configuration files.`,
             file: file.path,
-            line: findLineNumber(file.content, idx),
+            line: findLineNumber(file, idx),
             evidence: maskedValue,
             fix: {
               description: `Replace with environment variable reference`,
@@ -533,7 +533,7 @@ export const secretRules: ReadonlyArray<Rule> = [
           title: "Environment variable echoed to terminal",
           description: `Hook or script echoes sensitive environment variable. This exposes secrets in terminal output and session logs.`,
           file: file.path,
-          line: findLineNumber(file.content, match.index ?? 0),
+          line: findLineNumber(file, match.index ?? 0),
           evidence: match[0],
           fix: {
             description: "Remove echo of sensitive environment variables",
@@ -578,7 +578,7 @@ export const secretRules: ReadonlyArray<Rule> = [
           title: `Sensitive env var in CLAUDE.md: ${varName}`,
           description: `CLAUDE.md contains an assignment for "${varName}". CLAUDE.md files are typically committed to version control, exposing secrets to anyone who clones the repository.`,
           file: file.path,
-          line: findLineNumber(file.content, idx),
+          line: findLineNumber(file, idx),
           evidence: `${varName}=<redacted>`,
           fix: {
             description: "Move to .env file and reference via environment variable",
@@ -676,7 +676,7 @@ export const secretRules: ReadonlyArray<Rule> = [
           title: `URL contains embedded credentials`,
           description: `Found a URL with embedded username:password in ${file.path}. Credentials in URLs are exposed in logs, browser history, and referer headers. Use environment variables or a credentials manager instead.`,
           file: file.path,
-          line: findLineNumber(file.content, idx),
+          line: findLineNumber(file, idx),
           evidence: masked,
           fix: {
             description: "Use environment variables for credentials",
@@ -747,7 +747,7 @@ export const secretRules: ReadonlyArray<Rule> = [
             title: `Reference to ${description}: ${match[0]}`,
             description: `Found reference to "${match[0]}" — ${description}. Agent definitions and CLAUDE.md files should not reference credential files. If an agent is instructed to read these files, it could expose secrets.`,
             file: file.path,
-            line: findLineNumber(file.content, idx),
+            line: findLineNumber(file, idx),
             evidence: match[0],
           });
         }
@@ -791,7 +791,7 @@ export const secretRules: ReadonlyArray<Rule> = [
             title: `${description} found in config`,
             description: `Found "${match[0]}" in ${file.path}. Private keys should never be stored in configuration files — they grant authentication access and should be stored in secure key stores or referenced via file paths with restrictive permissions.`,
             file: file.path,
-            line: findLineNumber(file.content, idx),
+            line: findLineNumber(file, idx),
             evidence: match[0],
             fix: {
               description: "Remove private key and reference a key file path instead",
@@ -845,7 +845,7 @@ export const secretRules: ReadonlyArray<Rule> = [
             title: `Webhook URL found: ${description.split(" — ")[0]}`,
             description: `Found a ${description}. Webhook URLs contain embedded secrets and should be stored in environment variables. Anyone with this URL can post messages to the channel.`,
             file: file.path,
-            line: findLineNumber(file.content, idx),
+            line: findLineNumber(file, idx),
             evidence: maskSecretValue(match[0]),
             fix: {
               description: "Store webhook URL in an environment variable",
@@ -894,7 +894,7 @@ export const secretRules: ReadonlyArray<Rule> = [
           title: `Potential base64-obfuscated payload (${match[1].length} chars)`,
           description: `Found a long base64-encoded string (${match[1].length} characters) in ${file.path}. Attackers may encode secrets or malicious instructions in base64 to bypass pattern-matching detection. Decode and inspect this value.`,
           file: file.path,
-          line: findLineNumber(file.content, idx),
+          line: findLineNumber(file, idx),
           evidence: match[1].substring(0, 20) + "..." + match[1].substring(match[1].length - 10),
         });
       }
@@ -942,7 +942,7 @@ export const secretRules: ReadonlyArray<Rule> = [
             title: `Hardcoded internal IP with port: ${match[0]}`,
             description: `Found "${match[0]}" — ${description}. Hardcoded internal IPs expose network topology and service locations. Use environment variables or DNS names instead.`,
             file: file.path,
-            line: findLineNumber(file.content, idx),
+            line: findLineNumber(file, idx),
             evidence: match[0],
             fix: {
               description: "Replace with environment variable or DNS name",
@@ -988,7 +988,7 @@ export const secretRules: ReadonlyArray<Rule> = [
           title: "Credential-like value assigned to a secret key",
           description: `Found a high-entropy value assigned to a secret-named key in ${file.path}. Values like this are usually API keys, tokens, or client secrets that should come from environment variables or a secret manager.`,
           file: file.path,
-          line: findLineNumber(file.content, idx),
+          line: findLineNumber(file, idx),
           evidence: maskSecretValue(value),
           fix: {
             description: "Replace with an environment variable reference",
@@ -1038,7 +1038,7 @@ export const secretRules: ReadonlyArray<Rule> = [
           title: `High-entropy string (${value.length} chars, ${shannonEntropy(value).toFixed(1)} bits/char)`,
           description: `Found a long high-entropy string in ${file.path}. It does not match a known key format but has the statistical profile of a secret. Verify whether it is a credential and move it to an environment variable if so.`,
           file: file.path,
-          line: findLineNumber(file.content, idx),
+          line: findLineNumber(file, idx),
           evidence: maskSecretValue(value),
         });
       }

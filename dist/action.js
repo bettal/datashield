@@ -14587,9 +14587,55 @@ function ssnPlausible(value) {
   return true;
 }
 
+// src/rules/file-context.ts
+var cache = /* @__PURE__ */ new WeakMap();
+var FENCE_PATTERN = /```|~~~/g;
+var NEWLINE = 10;
+function buildContext(content) {
+  const lineStarts = [0];
+  for (let i = 0; i < content.length; i += 1) {
+    if (content.charCodeAt(i) === NEWLINE) lineStarts.push(i + 1);
+  }
+  const fenceMarkers = [];
+  FENCE_PATTERN.lastIndex = 0;
+  let match;
+  while ((match = FENCE_PATTERN.exec(content)) !== null) {
+    fenceMarkers.push(match.index);
+  }
+  return { lineStarts, fenceMarkers };
+}
+function getFileContext(file) {
+  const cached = cache.get(file);
+  if (cached !== void 0) return cached;
+  const built = buildContext(file.content);
+  cache.set(file, built);
+  return built;
+}
+function countUpTo(sorted, target) {
+  let low = 0;
+  let high = sorted.length;
+  while (low < high) {
+    const mid = low + high >>> 1;
+    if (sorted[mid] <= target) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+  return low;
+}
+function lineNumberAt(file, matchIndex) {
+  const { lineStarts } = getFileContext(file);
+  return countUpTo(lineStarts, matchIndex);
+}
+function isInsideCodeFenceAt(file, matchIndex) {
+  const { fenceMarkers } = getFileContext(file);
+  return countUpTo(fenceMarkers, matchIndex - 1) % 2 === 1;
+}
+
 // src/rules/helpers.ts
-function findLineNumber(content, matchIndex) {
-  return content.substring(0, matchIndex).split("\n").length;
+function findLineNumber(file, matchIndex) {
+  return lineNumberAt(file, matchIndex);
 }
 function findAllMatches2(content, pattern) {
   const flags = pattern.flags.includes("g") ? pattern.flags : pattern.flags + "g";
@@ -14638,10 +14684,8 @@ function isMarkdownLikeFile(file) {
 function isExampleLikePath2(file) {
   return isExampleLikePath(file.path);
 }
-function isInsideCodeFence(content, matchIndex) {
-  const before = content.slice(0, matchIndex);
-  const fences = before.match(/```|~~~/g);
-  return fences !== null && fences.length % 2 === 1;
+function isInsideCodeFence(file, matchIndex) {
+  return isInsideCodeFenceAt(file, matchIndex);
 }
 function hasNearbyCodeFence(content, matchIndex) {
   const windowStart = Math.max(0, matchIndex - 800);
@@ -14671,7 +14715,7 @@ function hasExampleOrTestContext(content, matchIndex) {
 function isLikelyExampleValue(file, matchIndex) {
   if (!isMarkdownLikeFile(file)) return false;
   if (!isExampleLikePath2(file)) return false;
-  return isInsideCodeFence(file.content, matchIndex) || hasExampleOrTestContext(file.content, matchIndex);
+  return isInsideCodeFence(file, matchIndex) || hasExampleOrTestContext(file.content, matchIndex);
 }
 
 // src/rules/secrets.ts
@@ -15109,7 +15153,7 @@ var secretRules = [
             title: `Hardcoded ${secretPattern.description}`,
             description: `Found ${secretPattern.description} in ${file.path}. Secrets must never be hardcoded in configuration files.`,
             file: file.path,
-            line: findLineNumber(file.content, idx),
+            line: findLineNumber(file, idx),
             evidence: maskedValue,
             fix: {
               description: `Replace with environment variable reference`,
@@ -15141,7 +15185,7 @@ var secretRules = [
           title: "Environment variable echoed to terminal",
           description: `Hook or script echoes sensitive environment variable. This exposes secrets in terminal output and session logs.`,
           file: file.path,
-          line: findLineNumber(file.content, match.index ?? 0),
+          line: findLineNumber(file, match.index ?? 0),
           evidence: match[0],
           fix: {
             description: "Remove echo of sensitive environment variables",
@@ -15177,7 +15221,7 @@ var secretRules = [
           title: `Sensitive env var in CLAUDE.md: ${varName}`,
           description: `CLAUDE.md contains an assignment for "${varName}". CLAUDE.md files are typically committed to version control, exposing secrets to anyone who clones the repository.`,
           file: file.path,
-          line: findLineNumber(file.content, idx),
+          line: findLineNumber(file, idx),
           evidence: `${varName}=<redacted>`,
           fix: {
             description: "Move to .env file and reference via environment variable",
@@ -15255,7 +15299,7 @@ var secretRules = [
           title: `URL contains embedded credentials`,
           description: `Found a URL with embedded username:password in ${file.path}. Credentials in URLs are exposed in logs, browser history, and referer headers. Use environment variables or a credentials manager instead.`,
           file: file.path,
-          line: findLineNumber(file.content, idx),
+          line: findLineNumber(file, idx),
           evidence: masked,
           fix: {
             description: "Use environment variables for credentials",
@@ -15318,7 +15362,7 @@ var secretRules = [
             title: `Reference to ${description}: ${match[0]}`,
             description: `Found reference to "${match[0]}" \u2014 ${description}. Agent definitions and CLAUDE.md files should not reference credential files. If an agent is instructed to read these files, it could expose secrets.`,
             file: file.path,
-            line: findLineNumber(file.content, idx),
+            line: findLineNumber(file, idx),
             evidence: match[0]
           });
         }
@@ -15355,7 +15399,7 @@ var secretRules = [
             title: `${description} found in config`,
             description: `Found "${match[0]}" in ${file.path}. Private keys should never be stored in configuration files \u2014 they grant authentication access and should be stored in secure key stores or referenced via file paths with restrictive permissions.`,
             file: file.path,
-            line: findLineNumber(file.content, idx),
+            line: findLineNumber(file, idx),
             evidence: match[0],
             fix: {
               description: "Remove private key and reference a key file path instead",
@@ -15402,7 +15446,7 @@ var secretRules = [
             title: `Webhook URL found: ${description.split(" \u2014 ")[0]}`,
             description: `Found a ${description}. Webhook URLs contain embedded secrets and should be stored in environment variables. Anyone with this URL can post messages to the channel.`,
             file: file.path,
-            line: findLineNumber(file.content, idx),
+            line: findLineNumber(file, idx),
             evidence: maskSecretValue(match[0]),
             fix: {
               description: "Store webhook URL in an environment variable",
@@ -15439,7 +15483,7 @@ var secretRules = [
           title: `Potential base64-obfuscated payload (${match[1].length} chars)`,
           description: `Found a long base64-encoded string (${match[1].length} characters) in ${file.path}. Attackers may encode secrets or malicious instructions in base64 to bypass pattern-matching detection. Decode and inspect this value.`,
           file: file.path,
-          line: findLineNumber(file.content, idx),
+          line: findLineNumber(file, idx),
           evidence: match[1].substring(0, 20) + "..." + match[1].substring(match[1].length - 10)
         });
       }
@@ -15479,7 +15523,7 @@ var secretRules = [
             title: `Hardcoded internal IP with port: ${match[0]}`,
             description: `Found "${match[0]}" \u2014 ${description}. Hardcoded internal IPs expose network topology and service locations. Use environment variables or DNS names instead.`,
             file: file.path,
-            line: findLineNumber(file.content, idx),
+            line: findLineNumber(file, idx),
             evidence: match[0],
             fix: {
               description: "Replace with environment variable or DNS name",
@@ -15516,7 +15560,7 @@ var secretRules = [
           title: "Credential-like value assigned to a secret key",
           description: `Found a high-entropy value assigned to a secret-named key in ${file.path}. Values like this are usually API keys, tokens, or client secrets that should come from environment variables or a secret manager.`,
           file: file.path,
-          line: findLineNumber(file.content, idx),
+          line: findLineNumber(file, idx),
           evidence: maskSecretValue(value),
           fix: {
             description: "Replace with an environment variable reference",
@@ -15556,7 +15600,7 @@ var secretRules = [
           title: `High-entropy string (${value.length} chars, ${shannonEntropy(value).toFixed(1)} bits/char)`,
           description: `Found a long high-entropy string in ${file.path}. It does not match a known key format but has the statistical profile of a secret. Verify whether it is a credential and move it to an environment variable if so.`,
           file: file.path,
-          line: findLineNumber(file.content, idx),
+          line: findLineNumber(file, idx),
           evidence: maskSecretValue(value)
         });
       }
@@ -15631,7 +15675,7 @@ function makePiiFinding(input) {
     title: input.title,
     description: input.description,
     file: input.file.path,
-    line: findLineNumber(input.file.content, input.index),
+    line: findLineNumber(input.file, input.index),
     evidence: input.evidence
   };
 }
@@ -16118,7 +16162,7 @@ var credentialRules = [
           title: "Login/password pair found",
           description: `Found a login ("${login}") and password assigned together in ${file.path}. Hardcoded credential pairs grant direct account access and must be moved to a secret manager.`,
           file: file.path,
-          line: findLineNumber(file.content, index),
+          line: findLineNumber(file, index),
           evidence: `login=${maskSecretValue(login)} password=${maskSecretValue(password)}`,
           fix: {
             description: "Move credentials to environment variables or a secret manager",
@@ -16157,7 +16201,7 @@ var credentialRules = [
           title: "HTTP Basic auth credentials found",
           description: `Found a decodable HTTP Basic auth header in ${file.path}. Base64 is not encryption \u2014 the login and password are exposed in plain text to anyone who reads the file.`,
           file: file.path,
-          line: findLineNumber(file.content, index),
+          line: findLineNumber(file, index),
           evidence: `login=${maskSecretValue(login)} password=${maskSecretValue(password)}`,
           fix: {
             description: "Remove the header and load credentials at runtime",
@@ -16193,7 +16237,7 @@ var credentialRules = [
           title: "Weak password found",
           description: `Found a commonly used weak password in ${file.path}. Weak credentials are trivially guessed and should be replaced with a strong, unique secret.`,
           file: file.path,
-          line: findLineNumber(file.content, index),
+          line: findLineNumber(file, index),
           evidence: `password=${maskSecretValue(password)}`
         });
       }
@@ -16225,7 +16269,7 @@ var codeRules = [
           title: "One-time / 2FA code found",
           description: `Found a one-time/2FA code in ${file.path}. One-time codes can be replayed within their validity window to bypass multi-factor authentication.`,
           file: file.path,
-          line: findLineNumber(file.content, index),
+          line: findLineNumber(file, index),
           evidence: maskSecretValue(code)
         });
       }
@@ -16256,7 +16300,7 @@ var codeRules = [
           title: `Recovery/backup codes found (${codes.length})`,
           description: `Found ${codes.length} account recovery/backup codes in ${file.path}. Recovery codes bypass MFA entirely and must be stored in a password manager, never in configuration or notes.`,
           file: file.path,
-          line: findLineNumber(file.content, index),
+          line: findLineNumber(file, index),
           evidence: `${codes.length} codes: ${maskSecretValue(codes[0])}, \u2026`
         });
       }
@@ -16271,7 +16315,7 @@ var codeRules = [
           title: "Recovery code found",
           description: `Found a recovery code in ${file.path}. Recovery codes bypass MFA and must not be stored in plain text.`,
           file: file.path,
-          line: findLineNumber(file.content, index),
+          line: findLineNumber(file, index),
           evidence: maskSecretValue(match[1])
         });
       }
@@ -16298,7 +16342,7 @@ var codeRules = [
           title: "PIN code found",
           description: `Found a PIN code in ${file.path}. PINs are short secrets that must not be stored in configuration or notes.`,
           file: file.path,
-          line: findLineNumber(file.content, index),
+          line: findLineNumber(file, index),
           evidence: maskSecretValue(match[1])
         });
       }

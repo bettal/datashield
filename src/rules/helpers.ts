@@ -1,6 +1,7 @@
 import type { ConfigFile, ConfigFileType } from "../types.js";
 import { isExampleLikePath as isExampleLikePathString } from "../source-context.js";
 import { maskSensitive } from "../detection/index.js";
+import { isInsideCodeFenceAt, lineNumberAt } from "./file-context.js";
 
 /**
  * Shared helpers for detection rules. Kept here so the secrets, PII,
@@ -8,8 +9,8 @@ import { maskSensitive } from "../detection/index.js";
  * match iteration, file classification, and false-positive suppression.
  */
 
-export function findLineNumber(content: string, matchIndex: number): number {
-  return content.substring(0, matchIndex).split("\n").length;
+export function findLineNumber(file: ConfigFile, matchIndex: number): number {
+  return lineNumberAt(file, matchIndex);
 }
 
 export function findAllMatches(content: string, pattern: RegExp): Array<RegExpMatchArray> {
@@ -72,14 +73,11 @@ export function isExampleLikePath(file: ConfigFile): boolean {
 }
 
 /**
- * True when the match position sits inside an open fenced code block. Used to
- * suppress generic/context heuristics on documentation code examples while
- * leaving high-signal vendor and checksum-validated detections active.
+ * True when the match position sits inside an open fenced code block. Uses the
+ * per-file fence index (O(log n)) instead of rescanning the prefix.
  */
-export function isInsideCodeFence(content: string, matchIndex: number): boolean {
-  const before = content.slice(0, matchIndex);
-  const fences = before.match(/```|~~~/g);
-  return fences !== null && fences.length % 2 === 1;
+export function isInsideCodeFence(file: ConfigFile, matchIndex: number): boolean {
+  return isInsideCodeFenceAt(file, matchIndex);
 }
 
 export function hasNearbyCodeFence(content: string, matchIndex: number): boolean {
@@ -118,7 +116,7 @@ export function isLikelyExampleValue(file: ConfigFile, matchIndex: number): bool
   if (!isMarkdownLikeFile(file)) return false;
   if (!isExampleLikePath(file)) return false;
   return (
-    isInsideCodeFence(file.content, matchIndex) ||
+    isInsideCodeFence(file, matchIndex) ||
     hasExampleOrTestContext(file.content, matchIndex)
   );
 }

@@ -42,7 +42,7 @@ export const codeRules: ReadonlyArray<Rule> = [
           title: "One-time / 2FA code found",
           description: `Found a one-time/2FA code in ${file.path}. One-time codes can be replayed within their validity window to bypass multi-factor authentication.`,
           file: file.path,
-          line: findLineNumber(file.content, index),
+          line: findLineNumber(file, index),
           evidence: maskSecretValue(code),
         });
       }
@@ -82,7 +82,7 @@ export const codeRules: ReadonlyArray<Rule> = [
           title: `Recovery/backup codes found (${codes.length})`,
           description: `Found ${codes.length} account recovery/backup codes in ${file.path}. Recovery codes bypass MFA entirely and must be stored in a password manager, never in configuration or notes.`,
           file: file.path,
-          line: findLineNumber(file.content, index),
+          line: findLineNumber(file, index),
           evidence: `${codes.length} codes: ${maskSecretValue(codes[0])}, …`,
         });
       }
@@ -98,7 +98,7 @@ export const codeRules: ReadonlyArray<Rule> = [
           title: "Recovery code found",
           description: `Found a recovery code in ${file.path}. Recovery codes bypass MFA and must not be stored in plain text.`,
           file: file.path,
-          line: findLineNumber(file.content, index),
+          line: findLineNumber(file, index),
           evidence: maskSecretValue(match[1]),
         });
       }
@@ -129,7 +129,7 @@ export const codeRules: ReadonlyArray<Rule> = [
           title: "PIN code found",
           description: `Found a PIN code in ${file.path}. PINs are short secrets that must not be stored in configuration or notes.`,
           file: file.path,
-          line: findLineNumber(file.content, index),
+          line: findLineNumber(file, index),
           evidence: maskSecretValue(match[1]),
         });
       }
