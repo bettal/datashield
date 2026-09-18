@@ -70,6 +70,392 @@ var init_source_context = __esm({
   }
 });
 
+// src/config/scan-config.ts
+import { existsSync, readFileSync } from "fs";
+import { homedir } from "os";
+import { join, resolve } from "path";
+import { z } from "zod";
+function isSafeRelativePath(value) {
+  if (value.length === 0) return false;
+  if (value.includes("\0")) return false;
+  if (value.startsWith("/") || value.startsWith("\\")) return false;
+  if (/^[A-Za-z]:[\\/]/.test(value)) return false;
+  const segments = value.split(/[\\/]/);
+  return segments.every((segment) => segment !== "..");
+}
+function addUnique(base, extra) {
+  const seen = new Set(base);
+  const result = [...base];
+  for (const item of extra) {
+    if (seen.has(item)) continue;
+    seen.add(item);
+    result.push(item);
+  }
+  return result;
+}
+function mergeByKey(base, override, key) {
+  if (!override || override.length === 0) return [...base];
+  const byKey = /* @__PURE__ */ new Map();
+  for (const item of base) byKey.set(key(item), item);
+  for (const item of override) byKey.set(key(item), item);
+  return [...byKey.values()];
+}
+function appendNewByKey(base, extra, key) {
+  if (!extra || extra.length === 0) return [...base];
+  const seen = new Set(base.map(key));
+  const result = [...base];
+  for (const item of extra) {
+    const itemKey = key(item);
+    if (seen.has(itemKey)) continue;
+    seen.add(itemKey);
+    result.push(item);
+  }
+  return result;
+}
+function mergeScanConfig(base, override) {
+  return {
+    version: 1,
+    ignoredDirs: addUnique(base.ignoredDirs, override.ignoredDirs ?? []),
+    rootMarkers: addUnique(base.rootMarkers, override.rootMarkers ?? []),
+    harnessRootDirs: addUnique(base.harnessRootDirs, override.harnessRootDirs ?? []),
+    files: mergeByKey(base.files, override.files, (rule) => rule.name),
+    directories: mergeByKey(base.directories, override.directories, (rule) => rule.path),
+    extensions: mergeByKey(base.extensions, override.extensions, (rule) => rule.extension),
+    genericScan: override.genericScan ?? base.genericScan,
+    genericScanExamples: override.genericScanExamples ?? base.genericScanExamples,
+    maxFiles: override.maxFiles ?? base.maxFiles,
+    maxTotalBytes: override.maxTotalBytes ?? base.maxTotalBytes
+  };
+}
+function mergeAdditiveScanConfig(base, override) {
+  return {
+    version: 1,
+    ignoredDirs: [...base.ignoredDirs],
+    rootMarkers: appendNewByKey(base.rootMarkers, override.rootMarkers, (marker) => marker),
+    harnessRootDirs: appendNewByKey(base.harnessRootDirs, override.harnessRootDirs, (dir) => dir),
+    files: appendNewByKey(base.files, override.files, (rule) => rule.name),
+    directories: appendNewByKey(base.directories, override.directories, (rule) => rule.path),
+    extensions: appendNewByKey(base.extensions, override.extensions, (rule) => rule.extension),
+    genericScan: base.genericScan,
+    genericScanExamples: base.genericScanExamples,
+    maxFiles: base.maxFiles,
+    maxTotalBytes: base.maxTotalBytes
+  };
+}
+function cloneScanConfig(config) {
+  return {
+    version: 1,
+    ignoredDirs: [...config.ignoredDirs],
+    rootMarkers: [...config.rootMarkers],
+    harnessRootDirs: [...config.harnessRootDirs],
+    files: config.files.map((rule) => ({ ...rule })),
+    directories: config.directories.map((rule) => ({ ...rule })),
+    extensions: config.extensions.map((rule) => ({ ...rule })),
+    genericScan: config.genericScan,
+    genericScanExamples: config.genericScanExamples,
+    maxFiles: config.maxFiles,
+    maxTotalBytes: config.maxTotalBytes
+  };
+}
+function resolveScanConfigSources(scanRoot, env = process.env) {
+  const home = env.HOME ?? env.USERPROFILE ?? homedir();
+  const trusted = [
+    join(home, ".config", "datashield", "scan.json"),
+    join(home, ".config", "datashield", "config.json")
+  ];
+  if (env.DATASHIELD_SCAN_CONFIG && env.DATASHIELD_SCAN_CONFIG.trim() !== "") {
+    trusted.push(resolve(env.DATASHIELD_SCAN_CONFIG));
+  }
+  const project = [
+    join(scanRoot, "datashield.config.json"),
+    join(scanRoot, "datashield.scan.json")
+  ];
+  return { trusted, project };
+}
+function readOverrideFile(path) {
+  let raw;
+  try {
+    raw = readFileSync(path, "utf-8");
+  } catch (error) {
+    throw new ScanConfigError(
+      `Failed to read scan config "${path}": ${error.message}`
+    );
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new ScanConfigError(
+      `Scan config "${path}" is not valid JSON: ${error.message}`
+    );
+  }
+  const result = ScanConfigOverrideSchema.safeParse(parsed);
+  if (!result.success) {
+    const details = result.error.issues.map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`).join("; ");
+    throw new ScanConfigError(`Scan config "${path}" failed validation: ${details}`);
+  }
+  return result.data;
+}
+function loadScanConfig(options) {
+  const env = options.env ?? process.env;
+  const { trusted, project } = resolveScanConfigSources(options.scanRoot, env);
+  let config = cloneScanConfig(DEFAULT_SCAN_CONFIG);
+  for (const path of trusted) {
+    if (!existsSync(path)) continue;
+    config = mergeScanConfig(config, readOverrideFile(path));
+  }
+  for (const path of project) {
+    if (!existsSync(path)) continue;
+    config = mergeAdditiveScanConfig(config, readOverrideFile(path));
+  }
+  return config;
+}
+var CONFIG_FILE_TYPES, ConfigFileTypeSchema, safeRelativePath, DirectoryRuleSchema, FileRuleSchema, ExtensionRuleSchema, ScanConfigOverrideSchema, ScanConfigSchema, DEFAULT_IGNORED_DIRS, DEFAULT_ROOT_MARKERS, DEFAULT_HARNESS_ROOT_DIRS, DEFAULT_FILES, DEFAULT_DIRECTORIES, DEFAULT_EXTENSIONS, DEFAULT_SCAN_CONFIG, ScanConfigError;
+var init_scan_config = __esm({
+  "src/config/scan-config.ts"() {
+    "use strict";
+    CONFIG_FILE_TYPES = [
+      "claude-md",
+      "settings-json",
+      "mcp-json",
+      "agent-md",
+      "skill-md",
+      "command-md",
+      "hook-script",
+      "hook-code",
+      "package-manager-config",
+      "rule-md",
+      "context-md",
+      "agents-md",
+      "codex-toml",
+      "hermes-yaml",
+      "harness-json",
+      "plugin-manifest",
+      "markdown-generic",
+      "text-generic",
+      "env-file",
+      "config-generic",
+      "unknown"
+    ];
+    ConfigFileTypeSchema = z.enum(CONFIG_FILE_TYPES);
+    safeRelativePath = (label) => z.string().min(1).refine(isSafeRelativePath, {
+      message: `${label} must be a relative path inside the scan root (no absolute paths or '..')`
+    });
+    DirectoryRuleSchema = z.object({
+      /** Directory path relative to the scan root (may contain "/"). */
+      path: safeRelativePath("path"),
+      /** File type assigned to every file discovered under this directory. */
+      type: ConfigFileTypeSchema,
+      /** Recurse into nested subdirectories (default: false). */
+      recursive: z.boolean().optional(),
+      /** Optional extension allow-list (e.g. [".md", ".markdown"]). */
+      extensions: z.array(z.string()).optional()
+    });
+    FileRuleSchema = z.object({
+      /** Exact file name (may contain "/" for a relative path). */
+      name: safeRelativePath("name"),
+      type: ConfigFileTypeSchema
+    });
+    ExtensionRuleSchema = z.object({
+      /** File extension including the leading dot (e.g. ".md"). */
+      extension: z.string().regex(/^\.[A-Za-z0-9]+$/, 'extension must look like ".md"'),
+      type: ConfigFileTypeSchema
+    });
+    ScanConfigOverrideSchema = z.object({
+      version: z.literal(1).optional(),
+      ignoredDirs: z.array(z.string()).optional(),
+      rootMarkers: z.array(z.string()).optional(),
+      harnessRootDirs: z.array(z.string()).optional(),
+      files: z.array(FileRuleSchema).optional(),
+      directories: z.array(DirectoryRuleSchema).optional(),
+      extensions: z.array(ExtensionRuleSchema).optional(),
+      genericScan: z.boolean().optional(),
+      genericScanExamples: z.boolean().optional(),
+      maxFiles: z.number().int().positive().optional(),
+      maxTotalBytes: z.number().int().positive().optional()
+    }).strict();
+    ScanConfigSchema = z.object({
+      version: z.literal(1),
+      ignoredDirs: z.array(z.string()),
+      rootMarkers: z.array(z.string()),
+      harnessRootDirs: z.array(z.string()),
+      files: z.array(FileRuleSchema),
+      directories: z.array(DirectoryRuleSchema),
+      extensions: z.array(ExtensionRuleSchema),
+      genericScan: z.boolean(),
+      genericScanExamples: z.boolean(),
+      /** Hard cap on the number of files read in one scan. */
+      maxFiles: z.number().int().positive(),
+      /** Hard cap on the total bytes read in one scan. */
+      maxTotalBytes: z.number().int().positive()
+    });
+    DEFAULT_IGNORED_DIRS = [
+      ".dmux",
+      ".git",
+      "node_modules",
+      ".next",
+      ".nuxt",
+      ".turbo",
+      ".cache",
+      "coverage",
+      "dist",
+      "build",
+      "out",
+      "target",
+      "vendor"
+    ];
+    DEFAULT_ROOT_MARKERS = [
+      "claude.md",
+      "settings.json",
+      "settings.local.json",
+      "mcp.json",
+      ".mcp.json",
+      ".claude.json",
+      "agents.md",
+      "opencode.json"
+    ];
+    DEFAULT_HARNESS_ROOT_DIRS = [
+      ".codex",
+      ".claude-plugin",
+      ".cursor",
+      ".gemini",
+      ".opencode"
+    ];
+    DEFAULT_FILES = [
+      { name: "CLAUDE.md", type: "claude-md" },
+      { name: ".claude/CLAUDE.md", type: "claude-md" },
+      { name: "settings.json", type: "settings-json" },
+      { name: "settings.local.json", type: "settings-json" },
+      { name: ".claude/settings.json", type: "settings-json" },
+      { name: ".claude/settings.local.json", type: "settings-json" },
+      { name: ".claude/router_runtime.js", type: "hook-code" },
+      { name: ".claude/setup.mjs", type: "hook-code" },
+      { name: ".vscode/tasks.json", type: "settings-json" },
+      { name: ".zed/settings.json", type: "settings-json" },
+      { name: ".zed/tasks.json", type: "settings-json" },
+      { name: "package.json", type: "package-manager-config" },
+      { name: "package-lock.json", type: "package-manager-config" },
+      { name: ".npmrc", type: "package-manager-config" },
+      { name: ".pnpmrc", type: "package-manager-config" },
+      { name: ".yarnrc", type: "package-manager-config" },
+      { name: ".yarnrc.yml", type: "package-manager-config" },
+      { name: "pnpm-workspace.yaml", type: "package-manager-config" },
+      { name: "pnpm-workspace.yml", type: "package-manager-config" },
+      { name: ".github/workflows/codeql_analysis.yml", type: "settings-json" },
+      { name: ".github/workflows/codeql_analysis.yaml", type: "settings-json" },
+      { name: ".config/gh-token-monitor/token", type: "hook-script" },
+      { name: ".config/systemd/user/gh-token-monitor.service", type: "hook-script" },
+      { name: ".local/bin/gh-token-monitor.sh", type: "hook-script" },
+      { name: "Library/LaunchAgents/com.user.gh-token-monitor.plist", type: "settings-json" },
+      { name: "mcp.json", type: "mcp-json" },
+      { name: ".mcp.json", type: "mcp-json" },
+      { name: ".claude/mcp.json", type: "mcp-json" },
+      { name: ".claude.json", type: "mcp-json" },
+      { name: "CLAUDE.local.md", type: "claude-md" },
+      { name: ".claude-plugin/plugin.json", type: "plugin-manifest" },
+      { name: ".claude-plugin/marketplace.json", type: "plugin-manifest" },
+      { name: "AGENTS.md", type: "agents-md" },
+      { name: "AGENTS.override.md", type: "agents-md" },
+      { name: ".codex/AGENTS.md", type: "agents-md" },
+      { name: "GEMINI.md", type: "agents-md" },
+      { name: ".gemini/GEMINI.md", type: "agents-md" },
+      { name: ".github/copilot-instructions.md", type: "agents-md" },
+      { name: ".cursorrules", type: "agents-md" },
+      { name: ".windsurfrules", type: "agents-md" },
+      { name: ".clinerules", type: "agents-md" },
+      { name: "config.toml", type: "codex-toml" },
+      { name: ".codex/config.toml", type: "codex-toml" },
+      { name: ".codex/hooks.json", type: "harness-json" },
+      { name: "config.yaml", type: "hermes-yaml" },
+      { name: ".cursor/mcp.json", type: "mcp-json" },
+      { name: ".codeium/windsurf/mcp_config.json", type: "mcp-json" },
+      { name: "mcp_config.json", type: "mcp-json" },
+      { name: ".roo/mcp.json", type: "mcp-json" },
+      { name: ".cline/mcp.json", type: "mcp-json" },
+      { name: "cline_mcp_settings.json", type: "mcp-json" },
+      { name: "mcp_settings.json", type: "mcp-json" },
+      { name: ".cursor/hooks.json", type: "harness-json" },
+      { name: ".gemini/settings.json", type: "harness-json" },
+      { name: "opencode.json", type: "harness-json" },
+      { name: "opencode.jsonc", type: "harness-json" },
+      { name: ".opencode/opencode.json", type: "harness-json" },
+      { name: ".opencode/AGENTS.md", type: "agents-md" }
+    ];
+    DEFAULT_DIRECTORIES = [
+      { path: "agents", type: "agent-md", recursive: true },
+      { path: ".claude/agents", type: "agent-md", recursive: true },
+      { path: "subagents", type: "agent-md", recursive: true },
+      { path: ".claude/subagents", type: "agent-md", recursive: true },
+      { path: "mcp-configs", type: "mcp-json" },
+      { path: ".claude/mcp-configs", type: "mcp-json" },
+      { path: "mcp", type: "mcp-json" },
+      { path: ".claude/mcp", type: "mcp-json" },
+      { path: "configs/mcp", type: "mcp-json" },
+      { path: "config/mcp", type: "mcp-json" },
+      { path: "skills", type: "skill-md", recursive: true },
+      { path: ".claude/skills", type: "skill-md", recursive: true },
+      { path: "hooks", type: "hook-script" },
+      { path: ".claude/hooks", type: "hook-script" },
+      { path: ".vscode", type: "hook-script" },
+      { path: ".zed", type: "hook-script" },
+      { path: "rules", type: "rule-md", recursive: true },
+      { path: ".claude/rules", type: "rule-md", recursive: true },
+      { path: "contexts", type: "context-md", recursive: true },
+      { path: ".claude/contexts", type: "context-md", recursive: true },
+      { path: "commands", type: "command-md", recursive: true },
+      { path: ".claude/commands", type: "command-md", recursive: true },
+      { path: "slash-commands", type: "command-md", recursive: true },
+      { path: ".claude/slash-commands", type: "command-md", recursive: true },
+      { path: ".github/agents", type: "agents-md" },
+      { path: ".github/instructions", type: "agents-md" },
+      { path: ".cursor/rules", type: "agents-md" },
+      { path: ".windsurf/rules", type: "agents-md" },
+      { path: ".roo/rules", type: "agents-md" },
+      { path: ".clinerules", type: "agents-md" },
+      { path: ".codex/agents", type: "codex-toml" },
+      // OpenCode harness surfaces.
+      { path: ".opencode/agents", type: "agent-md", recursive: true },
+      { path: ".opencode/commands", type: "command-md", recursive: true },
+      { path: ".opencode/skills", type: "skill-md", recursive: true },
+      { path: ".opencode/plugins", type: "hook-code", recursive: true }
+    ];
+    DEFAULT_EXTENSIONS = [
+      { extension: ".md", type: "markdown-generic" },
+      { extension: ".markdown", type: "markdown-generic" },
+      { extension: ".txt", type: "text-generic" },
+      { extension: ".text", type: "text-generic" },
+      { extension: ".env", type: "env-file" },
+      { extension: ".json", type: "config-generic" },
+      { extension: ".jsonc", type: "config-generic" },
+      { extension: ".yaml", type: "config-generic" },
+      { extension: ".yml", type: "config-generic" },
+      { extension: ".toml", type: "config-generic" },
+      { extension: ".ini", type: "config-generic" },
+      { extension: ".cfg", type: "config-generic" },
+      { extension: ".conf", type: "config-generic" }
+    ];
+    DEFAULT_SCAN_CONFIG = {
+      version: 1,
+      ignoredDirs: [...DEFAULT_IGNORED_DIRS],
+      rootMarkers: [...DEFAULT_ROOT_MARKERS],
+      harnessRootDirs: [...DEFAULT_HARNESS_ROOT_DIRS],
+      files: [...DEFAULT_FILES],
+      directories: [...DEFAULT_DIRECTORIES],
+      extensions: [...DEFAULT_EXTENSIONS],
+      genericScan: true,
+      genericScanExamples: false,
+      maxFiles: 2e4,
+      maxTotalBytes: 1e8
+    };
+    ScanConfigError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "ScanConfigError";
+      }
+    };
+  }
+});
+
 // src/scanner/paths.ts
 function toPosixPath(filePath) {
   return filePath.replace(/\\/g, "/");
@@ -81,21 +467,61 @@ var init_paths = __esm({
 });
 
 // src/scanner/discovery.ts
-import { readFileSync, existsSync, readdirSync, readlinkSync, statSync, lstatSync } from "fs";
-import { join, basename, extname, relative } from "path";
-function discoverConfigFiles(rootPath) {
+import {
+  readFileSync as readFileSync2,
+  existsSync as existsSync2,
+  readdirSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+  lstatSync
+} from "fs";
+import { join as join2, basename, extname, relative, isAbsolute } from "path";
+function buildDiscoveryEnv(config, realScanRoot) {
+  return {
+    config,
+    ignoredDirs: new Set(config.ignoredDirs),
+    harnessRootDirs: new Set(config.harnessRootDirs),
+    rootMarkers: new Set(config.rootMarkers.map((marker) => marker.toLowerCase())),
+    runtimeCompanions: new Set(CLAUDE_RUNTIME_COMPANION_NAMES),
+    extensionTypes: new Map(
+      config.extensions.map((rule) => [rule.extension.toLowerCase(), rule.type])
+    ),
+    realScanRoot,
+    visitedConfiguredDirs: /* @__PURE__ */ new Set(),
+    visitedGenericDirs: /* @__PURE__ */ new Set(),
+    maxFiles: config.maxFiles,
+    maxTotalBytes: config.maxTotalBytes,
+    budget: { files: 0, bytes: 0 }
+  };
+}
+function safeRealpath(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+function isWithinRoot(root, candidate) {
+  const rel = relative(root, candidate);
+  return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
+}
+function discoverConfigFiles(rootPath, config) {
+  const realScanRoot = safeRealpath(rootPath);
+  const env = buildDiscoveryEnv(config ?? loadScanConfig({ scanRoot: rootPath }), realScanRoot);
   const files = [];
   const danglingSymlinks = [];
   const seenFiles = /* @__PURE__ */ new Set();
   const claudeRoots = /* @__PURE__ */ new Set([rootPath]);
   const exampleClaudeFiles = /* @__PURE__ */ new Set();
-  walkForClaudeRoots(rootPath, rootPath, claudeRoots, exampleClaudeFiles);
+  walkForClaudeRoots(rootPath, rootPath, claudeRoots, exampleClaudeFiles, env);
   for (const exampleClaudeFile of [...exampleClaudeFiles].sort()) {
-    addDiscoveredFile(rootPath, exampleClaudeFile, "claude-md", files, seenFiles);
+    addDiscoveredFile(rootPath, exampleClaudeFile, "claude-md", files, seenFiles, env);
   }
   for (const claudeRoot of [...claudeRoots].sort()) {
-    scanClaudeRoot(rootPath, claudeRoot, files, seenFiles, danglingSymlinks);
+    scanClaudeRoot(rootPath, claudeRoot, files, seenFiles, danglingSymlinks, env);
   }
+  discoverGenericContent(rootPath, rootPath, files, seenFiles, danglingSymlinks, env);
   return { path: rootPath, files, danglingSymlinks };
 }
 function statOrNull(path) {
@@ -103,6 +529,20 @@ function statOrNull(path) {
     return statSync(path);
   } catch {
     return null;
+  }
+}
+function safeReaddir(dirPath) {
+  try {
+    return readdirSync(dirPath);
+  } catch {
+    return [];
+  }
+}
+function safeReaddirDirents(dirPath) {
+  try {
+    return readdirSync(dirPath, { withFileTypes: true });
+  } catch {
+    return [];
   }
 }
 function isDanglingSymlink(path) {
@@ -119,183 +559,148 @@ function readSymlinkTarget(path) {
     return "";
   }
 }
-function walkForClaudeRoots(scanRoot, dirPath, claudeRoots, exampleClaudeFiles) {
+function addDanglingSymlink(danglingSymlinks, path, target, type) {
+  if (danglingSymlinks.some((entry) => entry.path === path)) return;
+  danglingSymlinks.push({ path, target, type });
+}
+function walkForClaudeRoots(scanRoot, dirPath, claudeRoots, exampleClaudeFiles, env) {
   if (!statOrNull(dirPath)?.isDirectory()) return;
-  const entries = readdirSync(dirPath, { withFileTypes: true });
+  const entries = safeReaddirDirents(dirPath);
   for (const entry of entries) {
     if (entry.isDirectory()) {
-      if (IGNORED_DIRS.has(entry.name)) continue;
-      if (HARNESS_ROOT_DIRS.has(entry.name)) {
+      if (env.ignoredDirs.has(entry.name)) continue;
+      if (env.harnessRootDirs.has(entry.name)) {
         claudeRoots.add(dirPath);
       }
       if (entry.name === ".claude") {
         claudeRoots.add(dirPath);
         continue;
       }
-      walkForClaudeRoots(scanRoot, join(dirPath, entry.name), claudeRoots, exampleClaudeFiles);
+      walkForClaudeRoots(scanRoot, join2(dirPath, entry.name), claudeRoots, exampleClaudeFiles, env);
       continue;
     }
     if (!entry.isFile()) continue;
-    if (CLAUDE_ROOT_MARKERS.has(entry.name.toLowerCase())) {
-      if (isExampleOnlyClaudeRoot(scanRoot, dirPath, entry.name)) {
-        exampleClaudeFiles.add(join(dirPath, entry.name));
+    if (env.rootMarkers.has(entry.name.toLowerCase())) {
+      if (isExampleOnlyClaudeRoot(scanRoot, dirPath, entry.name, env)) {
+        exampleClaudeFiles.add(join2(dirPath, entry.name));
         continue;
       }
       claudeRoots.add(dirPath);
     }
   }
 }
-function isExampleOnlyClaudeRoot(scanRoot, dirPath, markerName) {
+function isExampleOnlyClaudeRoot(scanRoot, dirPath, markerName, env) {
   if (markerName.toLowerCase() !== "claude.md") return false;
   const relativeDir = relative(scanRoot, dirPath);
   const segments = relativeDir.split(/[\\/]/).filter(Boolean).map((segment) => segment.toLowerCase()).join("/");
   if (!isExampleLikePath(segments)) {
     return false;
   }
-  const hasRuntimeCompanion = CLAUDE_RUNTIME_COMPANION_NAMES.some(
-    (name) => existsSync(join(dirPath, name))
-  ) || existsSync(join(dirPath, ".claude"));
+  const hasRuntimeCompanion = [...env.runtimeCompanions].some(
+    (name) => existsSync2(join2(dirPath, name))
+  ) || existsSync2(join2(dirPath, ".claude"));
   return !hasRuntimeCompanion;
 }
-function scanClaudeRoot(scanRoot, claudeRoot, files, seenFiles, danglingSymlinks) {
-  const directFiles = [
-    ["CLAUDE.md", "claude-md"],
-    [".claude/CLAUDE.md", "claude-md"],
-    ["settings.json", "settings-json"],
-    ["settings.local.json", "settings-json"],
-    [".claude/settings.json", "settings-json"],
-    [".claude/settings.local.json", "settings-json"],
-    [".claude/router_runtime.js", "hook-code"],
-    [".claude/setup.mjs", "hook-code"],
-    [".vscode/tasks.json", "settings-json"],
-    [".zed/settings.json", "settings-json"],
-    [".zed/tasks.json", "settings-json"],
-    ["package.json", "package-manager-config"],
-    ["package-lock.json", "package-manager-config"],
-    [".npmrc", "package-manager-config"],
-    [".pnpmrc", "package-manager-config"],
-    [".yarnrc", "package-manager-config"],
-    [".yarnrc.yml", "package-manager-config"],
-    ["pnpm-workspace.yaml", "package-manager-config"],
-    ["pnpm-workspace.yml", "package-manager-config"],
-    [".github/workflows/codeql_analysis.yml", "settings-json"],
-    [".github/workflows/codeql_analysis.yaml", "settings-json"],
-    [".config/gh-token-monitor/token", "hook-script"],
-    [".config/systemd/user/gh-token-monitor.service", "hook-script"],
-    [".local/bin/gh-token-monitor.sh", "hook-script"],
-    ["Library/LaunchAgents/com.user.gh-token-monitor.plist", "settings-json"],
-    ["mcp.json", "mcp-json"],
-    [".mcp.json", "mcp-json"],
-    [".claude/mcp.json", "mcp-json"],
-    [".claude.json", "mcp-json"],
-    ["CLAUDE.local.md", "claude-md"],
-    // Claude Code plugin manifests
-    [".claude-plugin/plugin.json", "plugin-manifest"],
-    [".claude-plugin/marketplace.json", "plugin-manifest"],
-    // Shared and other-harness instruction files
-    ["AGENTS.md", "agents-md"],
-    ["AGENTS.override.md", "agents-md"],
-    [".codex/AGENTS.md", "agents-md"],
-    ["GEMINI.md", "agents-md"],
-    [".gemini/GEMINI.md", "agents-md"],
-    [".github/copilot-instructions.md", "agents-md"],
-    [".cursorrules", "agents-md"],
-    [".windsurfrules", "agents-md"],
-    [".clinerules", "agents-md"],
-    // OpenAI Codex CLI
-    ["config.toml", "codex-toml"],
-    [".codex/config.toml", "codex-toml"],
-    [".codex/hooks.json", "harness-json"],
-    // Hermes agent
-    ["config.yaml", "hermes-yaml"],
-    // Other harness MCP configs share the MCP rule set
-    [".cursor/mcp.json", "mcp-json"],
-    [".codeium/windsurf/mcp_config.json", "mcp-json"],
-    ["mcp_config.json", "mcp-json"],
-    [".roo/mcp.json", "mcp-json"],
-    [".cline/mcp.json", "mcp-json"],
-    ["cline_mcp_settings.json", "mcp-json"],
-    ["mcp_settings.json", "mcp-json"],
-    // Other harness settings and hooks
-    [".cursor/hooks.json", "harness-json"],
-    [".gemini/settings.json", "harness-json"],
-    ["opencode.json", "harness-json"],
-    ["opencode.jsonc", "harness-json"],
-    [".opencode/opencode.json", "harness-json"]
-  ];
-  for (const [relativePath, type] of directFiles) {
-    const fullPath = join(claudeRoot, relativePath);
-    if (existsSync(fullPath)) {
-      addDiscoveredFile(scanRoot, fullPath, type, files, seenFiles);
+function scanClaudeRoot(scanRoot, claudeRoot, files, seenFiles, danglingSymlinks, env) {
+  for (const rule of env.config.files) {
+    const fullPath = join2(claudeRoot, rule.name);
+    if (existsSync2(fullPath)) {
+      addDiscoveredFile(scanRoot, fullPath, rule.type, files, seenFiles, env);
     }
   }
-  const subdirs = [
-    ["agents", "agent-md"],
-    [".claude/agents", "agent-md"],
-    ["subagents", "agent-md"],
-    [".claude/subagents", "agent-md"],
-    ["mcp-configs", "mcp-json"],
-    [".claude/mcp-configs", "mcp-json"],
-    ["mcp", "mcp-json"],
-    [".claude/mcp", "mcp-json"],
-    ["configs/mcp", "mcp-json"],
-    ["config/mcp", "mcp-json"],
-    ["skills", "skill-md"],
-    [".claude/skills", "skill-md"],
-    ["hooks", "hook-script"],
-    [".claude/hooks", "hook-script"],
-    [".vscode", "hook-script"],
-    [".zed", "hook-script"],
-    ["rules", "rule-md"],
-    [".claude/rules", "rule-md"],
-    ["contexts", "context-md"],
-    [".claude/contexts", "context-md"],
-    ["commands", "command-md"],
-    [".claude/commands", "command-md"],
-    ["slash-commands", "command-md"],
-    [".claude/slash-commands", "command-md"],
-    // Other harness instruction and agent directories
-    [".github/agents", "agents-md"],
-    [".github/instructions", "agents-md"],
-    [".cursor/rules", "agents-md"],
-    [".windsurf/rules", "agents-md"],
-    [".roo/rules", "agents-md"],
-    [".clinerules", "agents-md"],
-    // Codex agent roles
-    [".codex/agents", "codex-toml"]
-  ];
-  for (const [subdir, type] of subdirs) {
-    const dirPath = join(claudeRoot, subdir);
+  for (const rule of env.config.directories) {
+    const dirPath = join2(claudeRoot, rule.path);
     if (!statOrNull(dirPath)?.isDirectory()) continue;
-    const entries = readdirSync(dirPath);
-    for (const entry of entries) {
-      const entryPath = join(dirPath, entry);
-      const entryStat = statOrNull(entryPath);
-      if (entryStat === null) {
-        if (isDanglingSymlink(entryPath)) {
-          danglingSymlinks.push({
-            path: toPosixPath(relative(scanRoot, entryPath)),
-            target: readSymlinkTarget(entryPath),
-            type
-          });
-        }
-        continue;
-      }
-      if (entryStat.isFile()) {
-        addDiscoveredFile(scanRoot, entryPath, inferType(entry, type), files, seenFiles);
-      }
-    }
+    collectDirectoryFiles(scanRoot, dirPath, rule, files, seenFiles, danglingSymlinks, env);
   }
-  discoverHermesProfiles(scanRoot, claudeRoot, files, seenFiles);
-  discoverReferencedHookScripts(scanRoot, claudeRoot, files, seenFiles);
+  discoverHermesProfiles(scanRoot, claudeRoot, files, seenFiles, env);
+  discoverReferencedHookScripts(scanRoot, claudeRoot, files, seenFiles, env);
 }
-function discoverHermesProfiles(scanRoot, claudeRoot, files, seenFiles) {
-  const profilesDir = join(claudeRoot, "profiles");
+function collectDirectoryFiles(scanRoot, dirPath, rule, files, seenFiles, danglingSymlinks, env) {
+  const realDir = safeRealpath(dirPath);
+  if (!isWithinRoot(env.realScanRoot, realDir)) return;
+  const visitKey = `${rule.path}\0${realDir}`;
+  if (env.visitedConfiguredDirs.has(visitKey)) return;
+  env.visitedConfiguredDirs.add(visitKey);
+  const entries = safeReaddir(dirPath);
+  for (const entry of entries) {
+    const entryPath = join2(dirPath, entry);
+    const entryStat = statOrNull(entryPath);
+    if (entryStat === null) {
+      if (isDanglingSymlink(entryPath)) {
+        addDanglingSymlink(
+          danglingSymlinks,
+          toPosixPath(relative(scanRoot, entryPath)),
+          readSymlinkTarget(entryPath),
+          rule.type
+        );
+      }
+      continue;
+    }
+    if (entryStat.isDirectory()) {
+      if (rule.recursive && !env.ignoredDirs.has(entry)) {
+        collectDirectoryFiles(scanRoot, entryPath, rule, files, seenFiles, danglingSymlinks, env);
+      }
+      continue;
+    }
+    if (!entryStat.isFile()) continue;
+    if (rule.extensions && !rule.extensions.includes(extname(entry).toLowerCase())) continue;
+    addDiscoveredFile(scanRoot, entryPath, inferType(entry, rule.type), files, seenFiles, env);
+  }
+}
+function discoverGenericContent(scanRoot, dirPath, files, seenFiles, danglingSymlinks, env) {
+  if (!env.config.genericScan) return;
+  if (!statOrNull(dirPath)?.isDirectory()) return;
+  const realDir = safeRealpath(dirPath);
+  if (!isWithinRoot(env.realScanRoot, realDir)) return;
+  if (env.visitedGenericDirs.has(realDir)) return;
+  env.visitedGenericDirs.add(realDir);
+  const entries = safeReaddir(dirPath);
+  for (const entry of entries) {
+    const entryPath = join2(dirPath, entry);
+    const entryStat = statOrNull(entryPath);
+    if (entryStat === null) {
+      if (isDanglingSymlink(entryPath)) {
+        addDanglingSymlink(
+          danglingSymlinks,
+          toPosixPath(relative(scanRoot, entryPath)),
+          readSymlinkTarget(entryPath),
+          "unknown"
+        );
+      }
+      continue;
+    }
+    if (entryStat.isDirectory()) {
+      if (env.ignoredDirs.has(entry)) continue;
+      const relativeDir = toPosixPath(relative(scanRoot, entryPath));
+      if (!env.config.genericScanExamples && isExampleLikePath(relativeDir)) continue;
+      discoverGenericContent(scanRoot, entryPath, files, seenFiles, danglingSymlinks, env);
+      continue;
+    }
+    if (!entryStat.isFile()) continue;
+    const relativePath = toPosixPath(relative(scanRoot, entryPath));
+    if (seenFiles.has(relativePath)) continue;
+    const type = classifyGenericFile(entry, env);
+    if (type === null) continue;
+    addDiscoveredFile(scanRoot, entryPath, type, files, seenFiles, env);
+  }
+}
+function classifyGenericFile(filename, env) {
+  const lower = filename.toLowerCase();
+  if (/^\.env(\.|$)/.test(lower) || lower === ".env") {
+    return "env-file";
+  }
+  const ext = extname(lower);
+  if (ext === "") return null;
+  return env.extensionTypes.get(ext) ?? null;
+}
+function discoverHermesProfiles(scanRoot, claudeRoot, files, seenFiles, env) {
+  const profilesDir = join2(claudeRoot, "profiles");
   if (!statOrNull(profilesDir)?.isDirectory()) return;
-  for (const entry of readdirSync(profilesDir)) {
-    const configPath = join(profilesDir, entry, "config.yaml");
+  for (const entry of safeReaddir(profilesDir)) {
+    const configPath = join2(profilesDir, entry, "config.yaml");
     if (statOrNull(configPath)?.isFile()) {
-      addDiscoveredFile(scanRoot, configPath, "hermes-yaml", files, seenFiles);
+      addDiscoveredFile(scanRoot, configPath, "hermes-yaml", files, seenFiles, env);
     }
   }
 }
@@ -329,7 +734,7 @@ function inferType(filename, defaultType) {
   if (ext === ".md" || ext === ".markdown") return defaultType;
   return "unknown";
 }
-function discoverReferencedHookScripts(scanRoot, claudeRoot, files, seenFiles) {
+function discoverReferencedHookScripts(scanRoot, claudeRoot, files, seenFiles, env) {
   const hookConfigPaths = [
     "settings.json",
     "settings.local.json",
@@ -339,13 +744,18 @@ function discoverReferencedHookScripts(scanRoot, claudeRoot, files, seenFiles) {
     ".claude/hooks/hooks.json"
   ];
   for (const relativeConfigPath of hookConfigPaths) {
-    const fullPath = join(claudeRoot, relativeConfigPath);
+    const fullPath = join2(claudeRoot, relativeConfigPath);
     if (!statOrNull(fullPath)?.isFile()) continue;
-    const content = readFileSync(fullPath, "utf-8");
+    let content;
+    try {
+      content = readFileSync2(fullPath, "utf-8");
+    } catch {
+      continue;
+    }
     for (const candidate of extractHookReferencedPaths(content)) {
       const resolvedPath = resolveHookReferencedPath(scanRoot, claudeRoot, candidate);
       if (!resolvedPath) continue;
-      addDiscoveredFile(scanRoot, resolvedPath, inferType(resolvedPath, "hook-script"), files, seenFiles);
+      addDiscoveredFile(scanRoot, resolvedPath, inferType(resolvedPath, "hook-script"), files, seenFiles, env);
     }
   }
 }
@@ -422,7 +832,7 @@ function resolveHookReferencedPath(scanRoot, claudeRoot, candidate) {
     normalized = envVarMatch[3];
   }
   if (normalized.startsWith("/")) return null;
-  const fullPath = join(claudeRoot, normalized);
+  const fullPath = join2(claudeRoot, normalized);
   if (!statOrNull(fullPath)?.isFile()) {
     return null;
   }
@@ -436,45 +846,40 @@ function resolveHookReferencedPath(scanRoot, claudeRoot, candidate) {
   }
   return fullPath;
 }
-function addDiscoveredFile(scanRoot, fullPath, type, files, seenFiles) {
+function addDiscoveredFile(scanRoot, fullPath, type, files, seenFiles, env) {
   const relativePath = toPosixPath(relative(scanRoot, fullPath));
+  if (relativePath.startsWith("..") || isAbsolute(relativePath)) return;
   if (seenFiles.has(relativePath)) return;
-  const content = readFileSync(fullPath, "utf-8");
+  if (env.budget.files >= env.maxFiles) return;
+  if (env.budget.bytes >= env.maxTotalBytes) return;
+  let realPath;
+  try {
+    realPath = realpathSync(fullPath);
+  } catch {
+    return;
+  }
+  if (!isWithinRoot(env.realScanRoot, realPath)) return;
+  const stats = statOrNull(fullPath);
+  if (stats !== null && stats.size > MAX_GENERIC_FILE_BYTES) return;
+  let content;
+  try {
+    content = readFileSync2(fullPath, "utf-8");
+  } catch {
+    return;
+  }
+  if (env.budget.bytes + content.length > env.maxTotalBytes) return;
   files.push({ path: relativePath, type, content });
   seenFiles.add(relativePath);
+  env.budget.files += 1;
+  env.budget.bytes += content.length;
 }
-var IGNORED_DIRS, CLAUDE_ROOT_MARKERS, HARNESS_ROOT_DIRS, CLAUDE_RUNTIME_COMPANION_NAMES, HOOK_SHELL_EXTENSIONS, HOOK_CODE_EXTENSIONS, HOOK_IMPLEMENTATION_EXTENSIONS, PACKAGE_MANAGER_CONFIG_FILES, PROJECT_ROOT_HOOK_VARS;
+var CLAUDE_RUNTIME_COMPANION_NAMES, HOOK_SHELL_EXTENSIONS, HOOK_CODE_EXTENSIONS, HOOK_IMPLEMENTATION_EXTENSIONS, PACKAGE_MANAGER_CONFIG_FILES, PROJECT_ROOT_HOOK_VARS, MAX_GENERIC_FILE_BYTES;
 var init_discovery = __esm({
   "src/scanner/discovery.ts"() {
     "use strict";
     init_source_context();
+    init_scan_config();
     init_paths();
-    IGNORED_DIRS = /* @__PURE__ */ new Set([
-      ".dmux",
-      ".git",
-      "node_modules",
-      ".next",
-      ".nuxt",
-      ".turbo",
-      ".cache",
-      "coverage",
-      "dist",
-      "build",
-      "out",
-      "target",
-      "vendor"
-    ]);
-    CLAUDE_ROOT_MARKERS = /* @__PURE__ */ new Set([
-      "claude.md",
-      "settings.json",
-      "settings.local.json",
-      "mcp.json",
-      ".mcp.json",
-      ".claude.json",
-      "agents.md",
-      "opencode.json"
-    ]);
-    HARNESS_ROOT_DIRS = /* @__PURE__ */ new Set([".codex", ".claude-plugin", ".cursor", ".gemini", ".opencode"]);
     CLAUDE_RUNTIME_COMPANION_NAMES = [
       "settings.json",
       "settings.local.json",
@@ -516,51 +921,253 @@ var init_discovery = __esm({
       "CLAUDE_PROJECT_DIR",
       "PWD"
     ]);
+    MAX_GENERIC_FILE_BYTES = 5e6;
   }
 });
 
-// src/rules/secrets.ts
-function findLineNumber(content, matchIndex) {
-  return content.substring(0, matchIndex).split("\n").length;
+// src/detection/entropy.ts
+function shannonEntropy(value) {
+  if (value.length === 0) return 0;
+  const counts = /* @__PURE__ */ new Map();
+  for (const char of value) {
+    counts.set(char, (counts.get(char) ?? 0) + 1);
+  }
+  let entropy = 0;
+  for (const count of counts.values()) {
+    const probability = count / value.length;
+    entropy -= probability * Math.log2(probability);
+  }
+  return entropy;
+}
+function looksLikeHighEntropySecret(value, minLength = 20, threshold = 3.5) {
+  const trimmed = value.trim();
+  if (trimmed.length < minLength) return false;
+  if (new Set(trimmed).size < 8) return false;
+  if (/^\d+$/.test(trimmed)) return false;
+  if (/^[A-Za-z]+$/.test(trimmed)) return false;
+  const lower = trimmed.toLowerCase();
+  if (COMMON_WORD_PATTERN.test(lower)) return false;
+  if (lower.includes("your_") || lower.includes("your-")) return false;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)) {
+    return false;
+  }
+  if (/^(?:\/|\.\/|~\/)[\w./-]+$/.test(trimmed)) return false;
+  if (/^[a-z]+:\/\//i.test(trimmed)) return false;
+  return shannonEntropy(trimmed) >= threshold;
+}
+var COMMON_WORD_PATTERN;
+var init_entropy = __esm({
+  "src/detection/entropy.ts"() {
+    "use strict";
+    COMMON_WORD_PATTERN = /(?:^|[^a-z0-9])(?:example|sample|placeholder|changeme|dummy|foobar|lorem|ipsum|test|password|secret|token|replace)(?:[^a-z0-9]|$)/;
+  }
+});
+
+// src/detection/mask.ts
+function maskSensitive(value) {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return "";
+  if (trimmed.length <= 4) return "*".repeat(trimmed.length);
+  if (trimmed.length <= 12) {
+    return trimmed.slice(0, 1) + "*".repeat(trimmed.length - 2) + trimmed.slice(-1);
+  }
+  return trimmed.slice(0, 8) + "..." + trimmed.slice(-4);
+}
+var init_mask = __esm({
+  "src/detection/mask.ts"() {
+    "use strict";
+  }
+});
+
+// src/detection/validators.ts
+function digitsOnly(value) {
+  return value.replace(/\D/g, "");
+}
+function luhnValid(value) {
+  const digits = digitsOnly(value);
+  if (digits.length < 12 || digits.length > 19) return false;
+  let sum = 0;
+  let double = false;
+  for (let i = digits.length - 1; i >= 0; i -= 1) {
+    let digit = Number(digits[i]);
+    if (double) {
+      digit *= 2;
+      if (digit > 9) digit -= 9;
+    }
+    sum += digit;
+    double = !double;
+  }
+  return sum % 10 === 0;
+}
+function ibanValid(value) {
+  const compact2 = value.replace(/\s+/g, "").toUpperCase();
+  if (!/^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$/.test(compact2)) return false;
+  const rearranged = compact2.slice(4) + compact2.slice(0, 4);
+  let remainder = 0;
+  for (const char of rearranged) {
+    const code = char >= "A" && char <= "Z" ? String(char.charCodeAt(0) - 55) : char;
+    for (const digit of code) {
+      remainder = (remainder * 10 + Number(digit)) % 97;
+    }
+  }
+  return remainder === 1;
+}
+function snilsValid(value) {
+  const digits = digitsOnly(value);
+  if (digits.length !== 11) return false;
+  const number = Number(digits.slice(0, 9));
+  const control = Number(digits.slice(9));
+  if (number < 1001998) {
+    const expected2 = number % 101;
+    return (expected2 === 100 ? 0 : expected2) === control;
+  }
+  let sum = 0;
+  for (let i = 0; i < 9; i += 1) {
+    sum += Number(digits[i]) * (9 - i);
+  }
+  const expected = sum % 101;
+  return (expected === 100 ? 0 : expected) === control;
+}
+function weightedCheck(digits, weights) {
+  let sum = 0;
+  for (let i = 0; i < weights.length; i += 1) {
+    sum += Number(digits[i]) * weights[i];
+  }
+  return sum % 11 % 10;
+}
+function innValid(value) {
+  const digits = digitsOnly(value);
+  if (digits.length === 10) {
+    return weightedCheck(digits, INN10_WEIGHTS) === Number(digits[9]);
+  }
+  if (digits.length === 12) {
+    const check11 = weightedCheck(digits, INN12_WEIGHTS_11) === Number(digits[10]);
+    const check12 = weightedCheck(digits, INN12_WEIGHTS_12) === Number(digits[11]);
+    return check11 && check12;
+  }
+  return false;
+}
+function ogrnValid(value) {
+  const digits = digitsOnly(value);
+  if (digits.length === 13) {
+    return Number(digits.slice(0, 12)) % 11 % 10 === Number(digits[12]);
+  }
+  if (digits.length === 15) {
+    return Number(digits.slice(0, 14)) % 13 % 10 === Number(digits[14]);
+  }
+  return false;
+}
+function ssnPlausible(value) {
+  const digits = digitsOnly(value);
+  if (digits.length !== 9) return false;
+  const area = Number(digits.slice(0, 3));
+  const group = Number(digits.slice(3, 5));
+  const serial = Number(digits.slice(5));
+  if (area === 0 || area === 666 || area >= 900) return false;
+  if (group === 0) return false;
+  if (serial === 0) return false;
+  return true;
+}
+var INN10_WEIGHTS, INN12_WEIGHTS_11, INN12_WEIGHTS_12;
+var init_validators = __esm({
+  "src/detection/validators.ts"() {
+    "use strict";
+    INN10_WEIGHTS = [2, 4, 10, 3, 5, 9, 4, 6, 8];
+    INN12_WEIGHTS_11 = [7, 2, 4, 10, 3, 5, 9, 4, 6, 8];
+    INN12_WEIGHTS_12 = [3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8];
+  }
+});
+
+// src/detection/index.ts
+var init_detection = __esm({
+  "src/detection/index.ts"() {
+    "use strict";
+    init_entropy();
+    init_mask();
+    init_validators();
+  }
+});
+
+// src/rules/file-context.ts
+function buildContext(content) {
+  const lineStarts = [0];
+  for (let i = 0; i < content.length; i += 1) {
+    if (content.charCodeAt(i) === NEWLINE) lineStarts.push(i + 1);
+  }
+  const fenceMarkers = [];
+  FENCE_PATTERN.lastIndex = 0;
+  let match;
+  while ((match = FENCE_PATTERN.exec(content)) !== null) {
+    fenceMarkers.push(match.index);
+  }
+  return { lineStarts, fenceMarkers };
+}
+function getFileContext(file) {
+  const cached = cache.get(file);
+  if (cached !== void 0) return cached;
+  const built = buildContext(file.content);
+  cache.set(file, built);
+  return built;
+}
+function countUpTo(sorted, target) {
+  let low = 0;
+  let high = sorted.length;
+  while (low < high) {
+    const mid = low + high >>> 1;
+    if (sorted[mid] <= target) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+  return low;
+}
+function lineNumberAt(file, matchIndex) {
+  const { lineStarts } = getFileContext(file);
+  return countUpTo(lineStarts, matchIndex);
+}
+function isInsideCodeFenceAt(file, matchIndex) {
+  const { fenceMarkers } = getFileContext(file);
+  return countUpTo(fenceMarkers, matchIndex - 1) % 2 === 1;
+}
+var cache, FENCE_PATTERN, NEWLINE;
+var init_file_context = __esm({
+  "src/rules/file-context.ts"() {
+    "use strict";
+    cache = /* @__PURE__ */ new WeakMap();
+    FENCE_PATTERN = /```|~~~/g;
+    NEWLINE = 10;
+  }
+});
+
+// src/rules/helpers.ts
+function findLineNumber(file, matchIndex) {
+  return lineNumberAt(file, matchIndex);
 }
 function findAllMatches2(content, pattern) {
   const flags = pattern.flags.includes("g") ? pattern.flags : pattern.flags + "g";
   return [...content.matchAll(new RegExp(pattern.source, flags))];
 }
 function maskSecretValue(value) {
-  if (value.length <= 12) return value;
-  return value.substring(0, 8) + "..." + value.substring(value.length - 4);
+  return maskSensitive(value);
 }
-function extractDelimitedToken(content, startIndex) {
-  let endIndex = startIndex;
-  while (endIndex < content.length) {
-    const char = content[endIndex];
-    if (/\s/.test(char) || /["'`)\]}>]/.test(char)) {
-      break;
-    }
-    endIndex += 1;
-  }
-  return content.slice(startIndex, endIndex).replace(/[.,;:]+$/, "");
+function isTextLikeFile(file) {
+  return TEXT_LIKE_FILE_TYPES.has(file.type);
 }
 function isMarkdownLikeFile(file) {
-  return [
-    "claude-md",
-    "agent-md",
-    "skill-md",
-    "command-md",
-    "agents-md",
-    "rule-md",
-    "context-md"
-  ].includes(file.type);
+  return MARKDOWN_LIKE_FILE_TYPES.has(file.type);
 }
 function isExampleLikePath2(file) {
   return isExampleLikePath(file.path);
+}
+function isInsideCodeFence(file, matchIndex) {
+  return isInsideCodeFenceAt(file, matchIndex);
 }
 function hasNearbyCodeFence(content, matchIndex) {
   const windowStart = Math.max(0, matchIndex - 800);
   const windowEnd = Math.min(content.length, matchIndex + 800);
   const window = content.slice(windowStart, windowEnd);
-  return /```|~~~~/.test(window);
+  return /```|~~~/.test(window);
 }
 function hasExampleOrTestContext(content, matchIndex) {
   const windowStart = Math.max(0, matchIndex - 1200);
@@ -580,6 +1187,64 @@ function hasExampleOrTestContext(content, matchIndex) {
     "stringspec",
     "behaviorspec"
   ].some((marker) => window.includes(marker));
+}
+function isLikelyExampleValue(file, matchIndex) {
+  if (!isMarkdownLikeFile(file)) return false;
+  if (!isExampleLikePath2(file)) return false;
+  return isInsideCodeFence(file, matchIndex) || hasExampleOrTestContext(file.content, matchIndex);
+}
+var TEXT_LIKE_FILE_TYPES, MARKDOWN_LIKE_FILE_TYPES;
+var init_helpers = __esm({
+  "src/rules/helpers.ts"() {
+    "use strict";
+    init_source_context();
+    init_detection();
+    init_file_context();
+    TEXT_LIKE_FILE_TYPES = /* @__PURE__ */ new Set([
+      "claude-md",
+      "agent-md",
+      "skill-md",
+      "command-md",
+      "agents-md",
+      "rule-md",
+      "context-md",
+      "markdown-generic",
+      "text-generic",
+      "env-file",
+      "config-generic",
+      "harness-json",
+      "settings-json",
+      "mcp-json",
+      "codex-toml",
+      "hermes-yaml",
+      // Hook implementations are security-relevant surfaces too.
+      "hook-script",
+      "hook-code"
+    ]);
+    MARKDOWN_LIKE_FILE_TYPES = /* @__PURE__ */ new Set([
+      "claude-md",
+      "agent-md",
+      "skill-md",
+      "command-md",
+      "agents-md",
+      "rule-md",
+      "context-md",
+      "markdown-generic"
+    ]);
+  }
+});
+
+// src/rules/secrets.ts
+function extractDelimitedToken(content, startIndex) {
+  let endIndex = startIndex;
+  while (endIndex < content.length) {
+    const char = content[endIndex];
+    if (/\s/.test(char) || /["'`)\]}>]/.test(char)) {
+      break;
+    }
+    endIndex += 1;
+  }
+  return content.slice(startIndex, endIndex).replace(/[.,;:]+$/, "");
 }
 function isLikelyMarkdownExamplePassword(file, secretPatternName, matchIndex) {
   if (secretPatternName !== "hardcoded-password") return false;
@@ -613,7 +1278,8 @@ var SECRET_PATTERNS, secretRules;
 var init_secrets = __esm({
   "src/rules/secrets.ts"() {
     "use strict";
-    init_source_context();
+    init_detection();
+    init_helpers();
     SECRET_PATTERNS = [
       {
         name: "anthropic-api-key",
@@ -627,7 +1293,7 @@ var init_secrets = __esm({
       },
       {
         name: "openai-legacy-api-key",
-        pattern: /sk-(?!ant-|proj-)[a-zA-Z0-9_-]{20,}/g,
+        pattern: /sk-(?!ant-|proj-|or-v1-)[a-zA-Z0-9_-]{20,}/g,
         description: "OpenAI API key"
       },
       {
@@ -666,11 +1332,6 @@ var init_secrets = __esm({
         description: "AWS secret access key"
       },
       {
-        name: "private-key",
-        pattern: /-----BEGIN\s+(RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE\s+KEY-----/g,
-        description: "Private key material"
-      },
-      {
         name: "hardcoded-password",
         pattern: /(?:password|passwd|pwd)\s*[=:]\s*["'][^"']{4,}["']/gi,
         description: "Hardcoded password"
@@ -682,7 +1343,7 @@ var init_secrets = __esm({
       },
       {
         name: "connection-string",
-        pattern: /(?:mongodb|postgres|mysql|redis):\/\/[^\s"']+:[^\s"']+@/gi,
+        pattern: /(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql|mariadb|redis|rediss|amqp|amqps):\/\/[^\s"']+:[^\s"']+@/gi,
         description: "Database connection string with credentials"
       },
       {
@@ -727,7 +1388,7 @@ var init_secrets = __esm({
       },
       {
         name: "azure-key",
-        pattern: /[a-zA-Z0-9/+]{86}==/g,
+        pattern: /(?:AccountKey|azure[_-]?(?:storage[_-]?)?(?:account[_-]?)?key)\s*[=:]\s*["']?[a-zA-Z0-9/+]{86}==/gi,
         description: "Azure storage account key"
       },
       {
@@ -749,6 +1410,231 @@ var init_secrets = __esm({
         name: "digitalocean-token",
         pattern: /dop_v1_[a-f0-9]{64}/g,
         description: "DigitalOcean personal access token"
+      },
+      {
+        name: "digitalocean-oauth",
+        pattern: /doo_v1_[a-f0-9]{64}/g,
+        description: "DigitalOcean OAuth token"
+      },
+      {
+        name: "gitlab-pat",
+        pattern: /glpat-[a-zA-Z0-9_-]{20}/g,
+        description: "GitLab personal access token"
+      },
+      {
+        name: "gitlab-runner-token",
+        pattern: /glrt-[a-zA-Z0-9_-]{20}/g,
+        description: "GitLab runner token"
+      },
+      {
+        name: "gitlab-pipeline-token",
+        pattern: /glptt-[a-zA-Z0-9_-]{20}/g,
+        description: "GitLab pipeline trigger token"
+      },
+      {
+        name: "github-oauth",
+        pattern: /gho_[a-zA-Z0-9]{36}/g,
+        description: "GitHub OAuth token"
+      },
+      {
+        name: "github-app-token",
+        pattern: /(?:ghu|ghs)_[a-zA-Z0-9]{36}/g,
+        description: "GitHub App token"
+      },
+      {
+        name: "github-refresh-token",
+        pattern: /ghr_[a-zA-Z0-9]{36}/g,
+        description: "GitHub refresh token"
+      },
+      {
+        name: "bitbucket-token",
+        pattern: /ATBB[a-zA-Z0-9]{28,}/g,
+        description: "Bitbucket access token"
+      },
+      {
+        name: "shopify-access-token",
+        pattern: /shpat_[a-f0-9]{32}/g,
+        description: "Shopify access token"
+      },
+      {
+        name: "shopify-shared-secret",
+        pattern: /shpss_[a-f0-9]{32}/g,
+        description: "Shopify shared secret"
+      },
+      {
+        name: "square-access-token",
+        pattern: /sq0atp-[a-zA-Z0-9_-]{22}/g,
+        description: "Square access token"
+      },
+      {
+        name: "square-oauth-secret",
+        pattern: /sq0csp-[a-zA-Z0-9_-]{43}/g,
+        description: "Square OAuth secret"
+      },
+      {
+        name: "paypal-braintree-token",
+        pattern: /access_token\$production\$[a-z0-9]{16}\$[a-f0-9]{32}/g,
+        description: "PayPal/Braintree access token"
+      },
+      {
+        name: "telegram-bot-token",
+        pattern: /\b\d{8,10}:AA[A-Za-z0-9_-]{33}\b/g,
+        description: "Telegram bot token"
+      },
+      {
+        name: "firebase-cloud-messaging-key",
+        pattern: /AAAA[A-Za-z0-9_-]{7}:[A-Za-z0-9_-]{140}/g,
+        description: "Firebase Cloud Messaging key"
+      },
+      {
+        name: "supabase-service-role",
+        pattern: /sbp_[a-f0-9]{40}/g,
+        description: "Supabase service role token"
+      },
+      {
+        name: "vercel-token",
+        pattern: /vercel_[a-zA-Z0-9]{24}/g,
+        description: "Vercel token"
+      },
+      {
+        name: "netlify-token",
+        pattern: /nfp_[a-zA-Z0-9]{40}/g,
+        description: "Netlify personal access token"
+      },
+      {
+        name: "railway-token",
+        pattern: /railway_[a-zA-Z0-9]{36}/g,
+        description: "Railway token"
+      },
+      {
+        name: "planetscale-token",
+        pattern: /pscale_tkn_[a-zA-Z0-9_]{43}/g,
+        description: "PlanetScale token"
+      },
+      {
+        name: "gcp-oauth-token",
+        pattern: /ya29\.[a-zA-Z0-9_-]{20,}/g,
+        description: "Google OAuth access token"
+      },
+      {
+        name: "gcp-oauth-client-secret",
+        pattern: /GOCSPX-[a-zA-Z0-9_-]{28}/g,
+        description: "Google OAuth client secret"
+      },
+      {
+        name: "azure-storage-account-key",
+        pattern: /AccountKey=[A-Za-z0-9+/=]{86,}/g,
+        description: "Azure Storage account key"
+      },
+      {
+        name: "azure-sas-token",
+        pattern: /[?&]sig=[A-Za-z0-9%+/=]{40,}/g,
+        description: "Azure SAS token"
+      },
+      {
+        name: "newrelic-api-key",
+        pattern: /NRAK-[A-Z0-9]{27}/g,
+        description: "New Relic API key"
+      },
+      {
+        name: "sentry-dsn",
+        pattern: /https:\/\/[a-f0-9]{32}@[a-z0-9.-]+\/\d+/g,
+        description: "Sentry DSN"
+      },
+      {
+        name: "pypi-token",
+        pattern: /pypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}/g,
+        description: "PyPI upload token"
+      },
+      {
+        name: "doppler-token",
+        pattern: /dp\.pt\.[a-zA-Z0-9]{43}/g,
+        description: "Doppler token"
+      },
+      {
+        name: "onepassword-token",
+        pattern: /ops_[a-zA-Z0-9]{20,}/g,
+        description: "1Password service token"
+      },
+      {
+        name: "groq-api-key",
+        pattern: /gsk_[a-zA-Z0-9]{52}/g,
+        description: "Groq API key"
+      },
+      {
+        name: "perplexity-api-key",
+        pattern: /pplx-[a-zA-Z0-9]{48}/g,
+        description: "Perplexity API key"
+      },
+      {
+        name: "replicate-token",
+        pattern: /r8_[a-zA-Z0-9]{37}/g,
+        description: "Replicate API token"
+      },
+      {
+        name: "dropbox-token",
+        pattern: /sl\.[a-zA-Z0-9_-]{130,}/g,
+        description: "Dropbox access token"
+      },
+      {
+        name: "mailgun-key",
+        pattern: /key-[a-f0-9]{32}/g,
+        description: "Mailgun API key"
+      },
+      {
+        name: "facebook-access-token",
+        pattern: /EAACEdEose0cBA[A-Za-z0-9]+/g,
+        description: "Facebook access token"
+      },
+      {
+        name: "notion-token",
+        pattern: /(?:ntn_[a-zA-Z0-9]{40,}|secret_[a-zA-Z0-9]{40,})/g,
+        description: "Notion integration token"
+      },
+      {
+        name: "openrouter-api-key",
+        pattern: /sk-or-v1-[a-f0-9]{64}/g,
+        description: "OpenRouter API key"
+      },
+      {
+        name: "anthropic-admin-key",
+        pattern: /sk-ant-admin[a-zA-Z0-9_-]{20,}/g,
+        description: "Anthropic admin API key"
+      },
+      {
+        name: "stripe-restricted-key",
+        pattern: /rk_(?:live|test)_[a-zA-Z0-9]{24,}/g,
+        description: "Stripe restricted API key"
+      },
+      {
+        name: "twilio-account-sid",
+        pattern: /AC[a-f0-9]{32}/g,
+        description: "Twilio account SID"
+      },
+      {
+        name: "sendinblue-key",
+        pattern: /xkeysib-[a-f0-9]{64}-[a-zA-Z0-9]{16}/g,
+        description: "Brevo (Sendinblue) API key"
+      },
+      {
+        name: "age-secret-key",
+        pattern: /AGE-SECRET-KEY-1[A-Z0-9]{58}/g,
+        description: "age encryption secret key"
+      },
+      {
+        name: "encrypted-private-key",
+        pattern: /-----BEGIN ENCRYPTED PRIVATE KEY-----/g,
+        description: "Encrypted private key material"
+      },
+      {
+        name: "aws-session-token",
+        pattern: /\bASIA[0-9A-Z]{16}\b/g,
+        description: "AWS temporary session access key"
+      },
+      {
+        name: "cloudinary-credentials",
+        pattern: /cloudinary:\/\/\d+:[A-Za-z0-9_-]+@[a-z0-9-]+/g,
+        description: "Cloudinary credentials URL"
       }
     ];
     secretRules = [
@@ -789,11 +1675,11 @@ var init_secrets = __esm({
                 title: `Hardcoded ${secretPattern.description}`,
                 description: `Found ${secretPattern.description} in ${file.path}. Secrets must never be hardcoded in configuration files.`,
                 file: file.path,
-                line: findLineNumber(file.content, idx),
+                line: findLineNumber(file, idx),
                 evidence: maskedValue,
                 fix: {
                   description: `Replace with environment variable reference`,
-                  before: rawValue,
+                  before: maskSecretValue(rawValue),
                   after: `\${${secretPattern.name.toUpperCase().replace(/-/g, "_")}}`,
                   auto: false
                 }
@@ -821,7 +1707,7 @@ var init_secrets = __esm({
               title: "Environment variable echoed to terminal",
               description: `Hook or script echoes sensitive environment variable. This exposes secrets in terminal output and session logs.`,
               file: file.path,
-              line: findLineNumber(file.content, match.index ?? 0),
+              line: findLineNumber(file, match.index ?? 0),
               evidence: match[0],
               fix: {
                 description: "Remove echo of sensitive environment variables",
@@ -841,7 +1727,7 @@ var init_secrets = __esm({
         severity: "high",
         category: "secrets",
         check(file) {
-          if (file.type !== "claude-md") return [];
+          if (!isTextLikeFile(file)) return [];
           const findings = [];
           const envAssignmentPattern = /(?:export\s+)?\b(\w*(?:API_KEY|SECRET_KEY|AUTH_TOKEN|ACCESS_TOKEN|PRIVATE_KEY|PASSWORD|CREDENTIAL|API_SECRET)\w*)\s*[=:]\s*["']?([^\s"']{4,})["']?/gi;
           const matches = findAllMatches2(file.content, envAssignmentPattern);
@@ -857,11 +1743,11 @@ var init_secrets = __esm({
               title: `Sensitive env var in CLAUDE.md: ${varName}`,
               description: `CLAUDE.md contains an assignment for "${varName}". CLAUDE.md files are typically committed to version control, exposing secrets to anyone who clones the repository.`,
               file: file.path,
-              line: findLineNumber(file.content, idx),
+              line: findLineNumber(file, idx),
               evidence: `${varName}=<redacted>`,
               fix: {
                 description: "Move to .env file and reference via environment variable",
-                before: match[0],
+                before: match[0].replace(match[2], maskSecretValue(match[2])),
                 after: `# Set ${varName} in your .env file`,
                 auto: false
               }
@@ -919,7 +1805,7 @@ var init_secrets = __esm({
         severity: "high",
         category: "secrets",
         check(file) {
-          if (file.type !== "agent-md" && file.type !== "claude-md") return [];
+          if (!isTextLikeFile(file)) return [];
           const findings = [];
           const urlCredPattern = /https?:\/\/[^:\s]+:[^@\s]+@[^\s"']+/g;
           const matches = findAllMatches2(file.content, urlCredPattern);
@@ -935,11 +1821,11 @@ var init_secrets = __esm({
               title: `URL contains embedded credentials`,
               description: `Found a URL with embedded username:password in ${file.path}. Credentials in URLs are exposed in logs, browser history, and referer headers. Use environment variables or a credentials manager instead.`,
               file: file.path,
-              line: findLineNumber(file.content, idx),
+              line: findLineNumber(file, idx),
               evidence: masked,
               fix: {
                 description: "Use environment variables for credentials",
-                before: match[0].substring(0, 40),
+                before: masked,
                 after: "https://${USERNAME}:${PASSWORD}@...",
                 auto: false
               }
@@ -955,7 +1841,7 @@ var init_secrets = __esm({
         severity: "high",
         category: "secrets",
         check(file) {
-          if (file.type !== "agent-md" && file.type !== "claude-md") return [];
+          if (!isTextLikeFile(file)) return [];
           const findings = [];
           const credentialFiles = [
             {
@@ -998,7 +1884,7 @@ var init_secrets = __esm({
                 title: `Reference to ${description}: ${match[0]}`,
                 description: `Found reference to "${match[0]}" \u2014 ${description}. Agent definitions and CLAUDE.md files should not reference credential files. If an agent is instructed to read these files, it could expose secrets.`,
                 file: file.path,
-                line: findLineNumber(file.content, idx),
+                line: findLineNumber(file, idx),
                 evidence: match[0]
               });
             }
@@ -1035,7 +1921,7 @@ var init_secrets = __esm({
                 title: `${description} found in config`,
                 description: `Found "${match[0]}" in ${file.path}. Private keys should never be stored in configuration files \u2014 they grant authentication access and should be stored in secure key stores or referenced via file paths with restrictive permissions.`,
                 file: file.path,
-                line: findLineNumber(file.content, idx),
+                line: findLineNumber(file, idx),
                 evidence: match[0],
                 fix: {
                   description: "Remove private key and reference a key file path instead",
@@ -1082,11 +1968,11 @@ var init_secrets = __esm({
                 title: `Webhook URL found: ${description.split(" \u2014 ")[0]}`,
                 description: `Found a ${description}. Webhook URLs contain embedded secrets and should be stored in environment variables. Anyone with this URL can post messages to the channel.`,
                 file: file.path,
-                line: findLineNumber(file.content, idx),
-                evidence: match[0].substring(0, 30) + "...",
+                line: findLineNumber(file, idx),
+                evidence: maskSecretValue(match[0]),
                 fix: {
                   description: "Store webhook URL in an environment variable",
-                  before: match[0].substring(0, 30),
+                  before: maskSecretValue(match[0]),
                   after: "${WEBHOOK_URL}",
                   auto: false
                 }
@@ -1103,7 +1989,7 @@ var init_secrets = __esm({
         severity: "medium",
         category: "secrets",
         check(file) {
-          if (file.type !== "agent-md" && file.type !== "claude-md") return [];
+          if (!isTextLikeFile(file)) return [];
           const findings = [];
           const base64Pattern = /(?<![a-zA-Z0-9/])([A-Za-z0-9+/]{60,}={0,2})(?![a-zA-Z0-9])/g;
           const matches = findAllMatches2(file.content, base64Pattern);
@@ -1119,7 +2005,7 @@ var init_secrets = __esm({
               title: `Potential base64-obfuscated payload (${match[1].length} chars)`,
               description: `Found a long base64-encoded string (${match[1].length} characters) in ${file.path}. Attackers may encode secrets or malicious instructions in base64 to bypass pattern-matching detection. Decode and inspect this value.`,
               file: file.path,
-              line: findLineNumber(file.content, idx),
+              line: findLineNumber(file, idx),
               evidence: match[1].substring(0, 20) + "..." + match[1].substring(match[1].length - 10)
             });
           }
@@ -1159,7 +2045,7 @@ var init_secrets = __esm({
                 title: `Hardcoded internal IP with port: ${match[0]}`,
                 description: `Found "${match[0]}" \u2014 ${description}. Hardcoded internal IPs expose network topology and service locations. Use environment variables or DNS names instead.`,
                 file: file.path,
-                line: findLineNumber(file.content, idx),
+                line: findLineNumber(file, idx),
                 evidence: match[0],
                 fix: {
                   description: "Replace with environment variable or DNS name",
@@ -1169,6 +2055,840 @@ var init_secrets = __esm({
                 }
               });
             }
+          }
+          return findings;
+        }
+      },
+      {
+        id: "secrets-generic-assignment",
+        name: "Generic Secret Assignment",
+        description: "Detects credential-like values assigned to secret-named keys without a known vendor prefix",
+        severity: "high",
+        category: "secrets",
+        check(file) {
+          if (!isTextLikeFile(file)) return [];
+          const findings = [];
+          const assignmentPattern = /(?:api[_-]?key|apikey|secret[_-]?key|client[_-]?secret|access[_-]?key|auth[_-]?token|encryption[_-]?key|signing[_-]?key|private[_-]?key|secret|token)\s*[=:]\s*["']?([A-Za-z0-9_\-./+=]{16,})["']?/gi;
+          for (const match of findAllMatches2(file.content, assignmentPattern)) {
+            const idx = match.index ?? 0;
+            const value = match[1];
+            if (value.startsWith("${") || value.startsWith("$")) continue;
+            if (isLikelyExampleValue(file, idx)) continue;
+            if (!looksLikeHighEntropySecret(value, 16, 3)) continue;
+            findings.push({
+              id: `secrets-generic-assignment-${idx}`,
+              severity: "high",
+              category: "secrets",
+              title: "Credential-like value assigned to a secret key",
+              description: `Found a high-entropy value assigned to a secret-named key in ${file.path}. Values like this are usually API keys, tokens, or client secrets that should come from environment variables or a secret manager.`,
+              file: file.path,
+              line: findLineNumber(file, idx),
+              evidence: maskSecretValue(value),
+              fix: {
+                description: "Replace with an environment variable reference",
+                before: match[0].replace(value, maskSecretValue(value)),
+                after: "# reference the value from an environment variable",
+                auto: false
+              }
+            });
+          }
+          return findings;
+        }
+      },
+      {
+        id: "secrets-high-entropy",
+        name: "High-Entropy String",
+        description: "Detects long random-looking strings that may be unlabelled secrets",
+        severity: "medium",
+        category: "secrets",
+        check(file) {
+          if (!isTextLikeFile(file)) return [];
+          const findings = [];
+          const quotedPattern = /["'`]([A-Za-z0-9+/=_-]{24,})["'`]/g;
+          for (const match of findAllMatches2(file.content, quotedPattern)) {
+            const idx = match.index ?? 0;
+            const value = match[1];
+            if (!looksLikeHighEntropySecret(value, 24, 3.5)) continue;
+            if (isLikelyExampleValue(file, idx)) continue;
+            if (/^[a-f0-9]{40}$/i.test(value) || /^[a-f0-9]{64}$/i.test(value)) continue;
+            const matchedByVendor = SECRET_PATTERNS.some(
+              (secretPattern) => findAllMatches2(value, secretPattern.pattern).length > 0
+            );
+            if (matchedByVendor) continue;
+            findings.push({
+              id: `secrets-high-entropy-${idx}`,
+              severity: "medium",
+              category: "secrets",
+              title: `High-entropy string (${value.length} chars, ${shannonEntropy(value).toFixed(1)} bits/char)`,
+              description: `Found a long high-entropy string in ${file.path}. It does not match a known key format but has the statistical profile of a secret. Verify whether it is a credential and move it to an environment variable if so.`,
+              file: file.path,
+              line: findLineNumber(file, idx),
+              evidence: maskSecretValue(value)
+            });
+          }
+          return findings;
+        }
+      }
+    ];
+  }
+});
+
+// src/rules/pii.ts
+function hasNearbyLabel(content, index, labels) {
+  const window = content.slice(Math.max(0, index - 80), index + 100).toLowerCase();
+  return labels.some((label) => {
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(
+      `(?:^|[^\\p{L}\\p{N}])${escaped}(?:[^\\p{L}\\p{N}]|$)`,
+      "u"
+    );
+    return pattern.test(window);
+  });
+}
+function isPlaceholderEmail(email) {
+  const [local, domain = ""] = email.toLowerCase().split("@");
+  if (PLACEHOLDER_EMAIL_LOCALS.has(local)) return true;
+  if (REDACTED_LOCAL_PATTERN.test(local)) return true;
+  if (TOKEN_PREFIX_LOCAL_PATTERN.test(local)) return true;
+  if (PLACEHOLDER_EMAIL_DOMAINS.some((placeholder) => domain.endsWith(placeholder))) return true;
+  if (domain.split(".").some((label) => PLACEHOLDER_EMAIL_DOMAIN_LABELS.has(label))) return true;
+  if (local === "git" && /^(?:github|gitlab|bitbucket)\.com$/.test(domain)) return true;
+  return false;
+}
+function makePiiFinding(input) {
+  return {
+    id: `${input.id}-${input.index}`,
+    severity: input.severity,
+    category: "pii",
+    title: input.title,
+    description: input.description,
+    file: input.file.path,
+    line: findLineNumber(input.file, input.index),
+    evidence: input.evidence
+  };
+}
+var EMAIL_PATTERN, PLACEHOLDER_EMAIL_LOCALS, PLACEHOLDER_EMAIL_DOMAINS, PLACEHOLDER_EMAIL_DOMAIN_LABELS, REDACTED_LOCAL_PATTERN, TOKEN_PREFIX_LOCAL_PATTERN, piiRules;
+var init_pii = __esm({
+  "src/rules/pii.ts"() {
+    "use strict";
+    init_helpers();
+    init_detection();
+    EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]{1,64}@[A-Za-z][A-Za-z0-9-]{0,62}(?:\.[A-Za-z0-9-]{1,63}){0,3}\.[A-Za-z]{2,24}\b/g;
+    PLACEHOLDER_EMAIL_LOCALS = /* @__PURE__ */ new Set([
+      "user",
+      "username",
+      "name",
+      "email",
+      "your",
+      "yourname",
+      "someone",
+      "test",
+      "example",
+      "sample",
+      "demo",
+      "noreply",
+      "no-reply"
+    ]);
+    PLACEHOLDER_EMAIL_DOMAINS = [
+      "example.com",
+      "example.org",
+      "example.net",
+      "test.com",
+      "localhost",
+      ".invalid",
+      ".test",
+      ".example"
+    ];
+    PLACEHOLDER_EMAIL_DOMAIN_LABELS = /* @__PURE__ */ new Set([
+      "example",
+      "test",
+      "localhost",
+      "invalid",
+      "sample",
+      "demo"
+    ]);
+    REDACTED_LOCAL_PATTERN = /x{3,}/i;
+    TOKEN_PREFIX_LOCAL_PATTERN = /^(?:gh[pousr]_|github_pat_|glpat-|sk-|pk_|sk_|xox|hf_|npm_)/i;
+    piiRules = [
+      {
+        id: "pii-email",
+        name: "Email Address",
+        description: "Detects personal email addresses in configuration and agent files",
+        severity: "medium",
+        category: "pii",
+        check(file) {
+          if (!isTextLikeFile(file)) return [];
+          const findings = [];
+          for (const match of findAllMatches2(file.content, EMAIL_PATTERN)) {
+            const index = match.index ?? 0;
+            const email = match[0];
+            if (isPlaceholderEmail(email)) continue;
+            if (isLikelyExampleValue(file, index)) continue;
+            const [local, domain] = email.split("@");
+            findings.push(
+              makePiiFinding({
+                id: "pii-email",
+                severity: "medium",
+                title: "Email address found",
+                description: `Found an email address in ${file.path}. Email addresses are personal data and should not be stored in agent configuration, skills, or committed notes.`,
+                file,
+                index,
+                evidence: `${maskSecretValue(local)}@${domain}`
+              })
+            );
+          }
+          return findings;
+        }
+      },
+      {
+        id: "pii-phone-ru",
+        name: "Russian Phone Number",
+        description: "Detects Russian phone numbers (+7 / 8 formats)",
+        severity: "high",
+        category: "pii",
+        check(file) {
+          if (!isTextLikeFile(file)) return [];
+          const findings = [];
+          const pattern = /(?<!\d)(?:\+7|8)[\s\-().]{0,2}\d{3}[\s\-().]{0,2}\d{3}[\s\-().]{0,2}\d{2}[\s\-().]{0,2}\d{2}(?!\d)/g;
+          for (const match of findAllMatches2(file.content, pattern)) {
+            const index = match.index ?? 0;
+            if (isLikelyExampleValue(file, index)) continue;
+            findings.push(
+              makePiiFinding({
+                id: "pii-phone-ru",
+                severity: "high",
+                title: "Russian phone number found",
+                description: `Found a Russian phone number in ${file.path}. Phone numbers are personal data; remove them or replace with a placeholder.`,
+                file,
+                index,
+                evidence: maskSecretValue(match[0])
+              })
+            );
+          }
+          return findings;
+        }
+      },
+      {
+        id: "pii-phone-intl",
+        name: "International Phone Number",
+        description: "Detects E.164-style international phone numbers",
+        severity: "medium",
+        category: "pii",
+        check(file) {
+          if (!isTextLikeFile(file)) return [];
+          const findings = [];
+          const pattern = /(?<!\d)\+[1-9]\d{7,14}(?!\d)/g;
+          for (const match of findAllMatches2(file.content, pattern)) {
+            const index = match.index ?? 0;
+            if (match[0].startsWith("+7")) continue;
+            if (isLikelyExampleValue(file, index)) continue;
+            findings.push(
+              makePiiFinding({
+                id: "pii-phone-intl",
+                severity: "medium",
+                title: "International phone number found",
+                description: `Found an international phone number in ${file.path}. Phone numbers are personal data; remove them or replace with a placeholder.`,
+                file,
+                index,
+                evidence: maskSecretValue(match[0])
+              })
+            );
+          }
+          return findings;
+        }
+      },
+      {
+        id: "pii-snils",
+        name: "\u0421\u041D\u0418\u041B\u0421",
+        description: "Detects Russian SNILS numbers with checksum validation",
+        severity: "high",
+        category: "pii",
+        check(file) {
+          if (!isTextLikeFile(file)) return [];
+          const findings = [];
+          const pattern = /(?<!\d)\d{3}[-\s]?\d{3}[-\s]?\d{3}[-\s]?\d{2}(?!\d)/g;
+          for (const match of findAllMatches2(file.content, pattern)) {
+            const index = match.index ?? 0;
+            if (!snilsValid(match[0])) continue;
+            findings.push(
+              makePiiFinding({
+                id: "pii-snils",
+                severity: "high",
+                title: "\u0421\u041D\u0418\u041B\u0421 found",
+                description: `Found a checksum-valid \u0421\u041D\u0418\u041B\u0421 in ${file.path}. This is sensitive personal data and must not be stored in configuration or notes.`,
+                file,
+                index,
+                evidence: maskSecretValue(match[0])
+              })
+            );
+          }
+          return findings;
+        }
+      },
+      {
+        id: "pii-inn",
+        name: "\u0418\u041D\u041D",
+        description: "Detects Russian INN (10/12 digits) with checksum and context validation",
+        severity: "high",
+        category: "pii",
+        check(file) {
+          if (!isTextLikeFile(file)) return [];
+          const findings = [];
+          const pattern = /(?<!\d)(?:\d{12}|\d{10})(?!\d)/g;
+          for (const match of findAllMatches2(file.content, pattern)) {
+            const index = match.index ?? 0;
+            if (!innValid(match[0])) continue;
+            if (!hasNearbyLabel(file.content, index, ["\u0438\u043D\u043D", "inn", "tax id", "taxpayer", "\u043D\u0430\u043B\u043E\u0433"])) continue;
+            findings.push(
+              makePiiFinding({
+                id: "pii-inn",
+                severity: "high",
+                title: "\u0418\u041D\u041D found",
+                description: `Found a checksum-valid \u0418\u041D\u041D near a tax-identifier label in ${file.path}. Tax identifiers are personal data.`,
+                file,
+                index,
+                evidence: maskSecretValue(match[0])
+              })
+            );
+          }
+          return findings;
+        }
+      },
+      {
+        id: "pii-ogrn",
+        name: "\u041E\u0413\u0420\u041D/\u041E\u0413\u0420\u041D\u0418\u041F",
+        description: "Detects Russian OGRN/OGRNIP numbers with checksum and context validation",
+        severity: "medium",
+        category: "pii",
+        check(file) {
+          if (!isTextLikeFile(file)) return [];
+          const findings = [];
+          const pattern = /(?<!\d)(?:\d{15}|\d{13})(?!\d)/g;
+          for (const match of findAllMatches2(file.content, pattern)) {
+            const index = match.index ?? 0;
+            if (!ogrnValid(match[0])) continue;
+            if (!hasNearbyLabel(file.content, index, ["\u043E\u0433\u0440\u043D", "ogrn", "\u043E\u0433\u0440\u043D\u0438\u043F"])) continue;
+            findings.push(
+              makePiiFinding({
+                id: "pii-ogrn",
+                severity: "medium",
+                title: "\u041E\u0413\u0420\u041D/\u041E\u0413\u0420\u041D\u0418\u041F found",
+                description: `Found a checksum-valid \u041E\u0413\u0420\u041D/\u041E\u0413\u0420\u041D\u0418\u041F near its label in ${file.path}. Registration identifiers are business personal data.`,
+                file,
+                index,
+                evidence: maskSecretValue(match[0])
+              })
+            );
+          }
+          return findings;
+        }
+      },
+      {
+        id: "pii-ru-document",
+        name: "Russian Passport / Driver License",
+        description: "Detects Russian passport or driver-license numbers (series + number) with context",
+        severity: "high",
+        category: "pii",
+        check(file) {
+          if (!isTextLikeFile(file)) return [];
+          const findings = [];
+          const pattern = /(?<!\d)\d{2}\s?\d{2}\s?\d{6}(?!\d)/g;
+          for (const match of findAllMatches2(file.content, pattern)) {
+            const index = match.index ?? 0;
+            const isPassport = hasNearbyLabel(file.content, index, ["\u043F\u0430\u0441\u043F\u043E\u0440\u0442", "passport", "\u0441\u0435\u0440\u0438\u044F", "series"]);
+            const isLicense = hasNearbyLabel(file.content, index, ["\u0432\u043E\u0434\u0438\u0442\u0435\u043B\u044C\u0441\u043A", "driver", "\u0432\u043E\u0434. \u0443\u0434", "\u0432\u0443 "]);
+            if (!isPassport && !isLicense) continue;
+            findings.push(
+              makePiiFinding({
+                id: "pii-ru-document",
+                severity: "high",
+                title: isPassport ? "Russian passport number found" : "Driver license number found",
+                description: `Found a Russian document number near an identifying label in ${file.path}. Government document numbers are highly sensitive personal data.`,
+                file,
+                index,
+                evidence: maskSecretValue(match[0])
+              })
+            );
+          }
+          return findings;
+        }
+      },
+      {
+        id: "pii-bank-card",
+        name: "Bank Card Number",
+        description: "Detects credit/debit card numbers that pass the Luhn checksum",
+        severity: "critical",
+        category: "pii",
+        check(file) {
+          if (!isTextLikeFile(file)) return [];
+          const findings = [];
+          const pattern = /(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)/g;
+          for (const match of findAllMatches2(file.content, pattern)) {
+            const index = match.index ?? 0;
+            const digits = match[0].replace(/\D/g, "");
+            if (digits.length < 13 || digits.length > 19) continue;
+            if (!luhnValid(digits)) continue;
+            if (digits.length < 16 && !hasNearbyLabel(file.content, index, [
+              "card",
+              "visa",
+              "mastercard",
+              "maestro",
+              "amex",
+              "american express",
+              "cvv",
+              "cvc",
+              "pan",
+              "credit",
+              "\u043A\u0430\u0440\u0442\u0430",
+              "\u043A\u0430\u0440\u0442\u044B"
+            ])) {
+              continue;
+            }
+            findings.push(
+              makePiiFinding({
+                id: "pii-bank-card",
+                severity: "critical",
+                title: "Bank card number found",
+                description: `Found a Luhn-valid bank card number in ${file.path}. Card numbers are regulated financial personal data and must never be stored in plain text.`,
+                file,
+                index,
+                evidence: maskSecretValue(digits)
+              })
+            );
+          }
+          return findings;
+        }
+      },
+      {
+        id: "pii-iban",
+        name: "IBAN",
+        description: "Detects IBAN account numbers with mod-97 validation",
+        severity: "high",
+        category: "pii",
+        check(file) {
+          if (!isTextLikeFile(file)) return [];
+          const findings = [];
+          const pattern = /(?<![A-Z0-9])[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){10,30}(?![A-Z0-9])/g;
+          for (const match of findAllMatches2(file.content, pattern)) {
+            const index = match.index ?? 0;
+            if (!ibanValid(match[0])) continue;
+            findings.push(
+              makePiiFinding({
+                id: "pii-iban",
+                severity: "high",
+                title: "IBAN found",
+                description: `Found a checksum-valid IBAN in ${file.path}. Bank account numbers are financial personal data.`,
+                file,
+                index,
+                evidence: maskSecretValue(match[0])
+              })
+            );
+          }
+          return findings;
+        }
+      },
+      {
+        id: "pii-bank-ru",
+        name: "Russian Bank Details",
+        description: "Detects Russian BIK and 20-digit settlement account numbers near their labels",
+        severity: "medium",
+        category: "pii",
+        check(file) {
+          if (!isTextLikeFile(file)) return [];
+          const findings = [];
+          const bikPattern = /(?<!\d)\d{9}(?!\d)/g;
+          for (const match of findAllMatches2(file.content, bikPattern)) {
+            const index = match.index ?? 0;
+            if (!hasNearbyLabel(file.content, index, ["\u0431\u0438\u043A", "bik"])) continue;
+            findings.push(
+              makePiiFinding({
+                id: "pii-bik",
+                severity: "medium",
+                title: "Russian BIK found",
+                description: `Found a BIK (bank identification code) near its label in ${file.path}.`,
+                file,
+                index,
+                evidence: maskSecretValue(match[0])
+              })
+            );
+          }
+          const accountPattern = /(?<!\d)\d{20}(?!\d)/g;
+          for (const match of findAllMatches2(file.content, accountPattern)) {
+            const index = match.index ?? 0;
+            if (!hasNearbyLabel(file.content, index, ["\u0440/\u0441", "\u0440\u0430\u0441\u0447\u0435\u0442\u043D", "\u0440\u0430\u0441\u0447\u0451\u0442\u043D", "account", "\u0441\u0447\u0435\u0442", "\u0441\u0447\u0451\u0442"])) continue;
+            findings.push(
+              makePiiFinding({
+                id: "pii-account-ru",
+                severity: "medium",
+                title: "Russian settlement account found",
+                description: `Found a 20-digit settlement account near its label in ${file.path}.`,
+                file,
+                index,
+                evidence: maskSecretValue(match[0])
+              })
+            );
+          }
+          return findings;
+        }
+      },
+      {
+        id: "pii-ssn-us",
+        name: "US Social Security Number",
+        description: "Detects US SSNs in the canonical XXX-XX-XXXX format",
+        severity: "high",
+        category: "pii",
+        check(file) {
+          if (!isTextLikeFile(file)) return [];
+          const findings = [];
+          const pattern = /(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)/g;
+          for (const match of findAllMatches2(file.content, pattern)) {
+            const index = match.index ?? 0;
+            if (!ssnPlausible(match[0])) continue;
+            findings.push(
+              makePiiFinding({
+                id: "pii-ssn",
+                severity: "high",
+                title: "US Social Security Number found",
+                description: `Found a plausible US SSN in ${file.path}. SSNs are sensitive personal identifiers.`,
+                file,
+                index,
+                evidence: maskSecretValue(match[0])
+              })
+            );
+          }
+          return findings;
+        }
+      }
+    ];
+  }
+});
+
+// src/rules/credentials.ts
+function isReferenceOrPlaceholder(value) {
+  const lower = value.toLowerCase();
+  if (value.startsWith("$") || value.startsWith("${")) return true;
+  if (value.includes("process.env")) return true;
+  return PLACEHOLDER_VALUES.has(lower);
+}
+function isPlausibleCredentialValue(value, minLength) {
+  if (value.length < minLength) return false;
+  if (CODE_PUNCTUATION.test(value)) return false;
+  if (CODE_KEYWORDS.has(value.toLowerCase())) return false;
+  return true;
+}
+function hasNearbyLogin(content, index) {
+  const window = content.slice(Math.max(0, index - 200), index);
+  return findAllMatches2(window, LOGIN_ASSIGNMENT).length > 0;
+}
+function decodeBase64(value) {
+  try {
+    const decoded = Buffer.from(value, "base64").toString("utf-8");
+    if (!/^[\x20-\x7E]+$/.test(decoded)) return null;
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+var PASSWORD_ASSIGNMENT, LOGIN_ASSIGNMENT, PLACEHOLDER_VALUES, CODE_KEYWORDS, COMMON_PASSWORDS, CODE_PUNCTUATION, credentialRules;
+var init_credentials = __esm({
+  "src/rules/credentials.ts"() {
+    "use strict";
+    init_helpers();
+    PASSWORD_ASSIGNMENT = /(?:password|passwd|pwd|pass)\s*[=:]\s*["']?([^\s"'#]{3,})["']?/gi;
+    LOGIN_ASSIGNMENT = /(?:username|user[_-]?name|login|user|email|логин|пользователь)\s*[=:]\s*["']?([^\s"'#]{2,})["']?/gi;
+    PLACEHOLDER_VALUES = /* @__PURE__ */ new Set([
+      "password",
+      "passwd",
+      "changeme",
+      "change_me",
+      "your_password",
+      "yourpassword",
+      "example",
+      "sample",
+      "test",
+      "todo",
+      "xxx",
+      "******",
+      "secret",
+      // Common database defaults and code type names that show up in docs.
+      "postgres",
+      "postgresql",
+      "mysql",
+      "mariadb",
+      "redis",
+      "mongo",
+      "mongodb",
+      "guest"
+    ]);
+    CODE_KEYWORDS = /* @__PURE__ */ new Set([
+      "string",
+      "boolean",
+      "number",
+      "integer",
+      "int",
+      "long",
+      "float",
+      "double",
+      "object",
+      "array",
+      "list",
+      "map",
+      "set",
+      "null",
+      "undefined",
+      "true",
+      "false",
+      "nil",
+      "none",
+      "void",
+      "any"
+    ]);
+    COMMON_PASSWORDS = /* @__PURE__ */ new Set([
+      "123456",
+      "1234567",
+      "12345678",
+      "123456789",
+      "1234567890",
+      "111111",
+      "123123",
+      "abc123",
+      "qwerty",
+      "qwerty123",
+      "password",
+      "passw0rd",
+      "admin",
+      "admin123",
+      "root",
+      "toor",
+      "letmein",
+      "welcome",
+      "changeme",
+      "iloveyou",
+      "monkey",
+      "dragon",
+      "master"
+    ]);
+    CODE_PUNCTUATION = /[(){}[\]<>=,;:./\\|]/;
+    credentialRules = [
+      {
+        id: "credentials-login-password-pair",
+        name: "Login/Password Pair",
+        description: "Detects a login and password assigned together in the same block",
+        severity: "high",
+        category: "credentials",
+        check(file) {
+          if (!isTextLikeFile(file)) return [];
+          const findings = [];
+          for (const passwordMatch of findAllMatches2(file.content, PASSWORD_ASSIGNMENT)) {
+            const index = passwordMatch.index ?? 0;
+            const password = passwordMatch[1];
+            if (isReferenceOrPlaceholder(password)) continue;
+            if (!isPlausibleCredentialValue(password, 6)) continue;
+            if (isLikelyExampleValue(file, index)) continue;
+            const windowStart = Math.max(0, index - 200);
+            const window = file.content.slice(windowStart, index);
+            const loginMatches = findAllMatches2(window, LOGIN_ASSIGNMENT);
+            if (loginMatches.length === 0) continue;
+            const login = loginMatches[loginMatches.length - 1][1];
+            if (isReferenceOrPlaceholder(login)) continue;
+            if (!isPlausibleCredentialValue(login, 3)) continue;
+            findings.push({
+              id: `credentials-login-password-pair-${index}`,
+              severity: "high",
+              category: "credentials",
+              title: "Login/password pair found",
+              description: `Found a login ("${login}") and password assigned together in ${file.path}. Hardcoded credential pairs grant direct account access and must be moved to a secret manager.`,
+              file: file.path,
+              line: findLineNumber(file, index),
+              evidence: `login=${maskSecretValue(login)} password=${maskSecretValue(password)}`,
+              fix: {
+                description: "Move credentials to environment variables or a secret manager",
+                before: `login=${maskSecretValue(login)} password=${maskSecretValue(password)}`,
+                after: "# load credentials from the environment at runtime",
+                auto: false
+              }
+            });
+          }
+          return findings;
+        }
+      },
+      {
+        id: "credentials-basic-auth",
+        name: "HTTP Basic Auth Credentials",
+        description: "Detects Authorization: Basic headers and decodes them to confirm user:pass",
+        severity: "critical",
+        category: "credentials",
+        check(file) {
+          if (!isTextLikeFile(file)) return [];
+          const findings = [];
+          const pattern = /(?:authorization\s*[:=]\s*)?["']?Basic\s+([A-Za-z0-9+/=]{8,})["']?/gi;
+          for (const match of findAllMatches2(file.content, pattern)) {
+            const index = match.index ?? 0;
+            const encoded = match[1];
+            const decoded = decodeBase64(encoded);
+            if (decoded === null) continue;
+            const separator = decoded.indexOf(":");
+            if (separator <= 0 || separator === decoded.length - 1) continue;
+            const login = decoded.slice(0, separator);
+            const password = decoded.slice(separator + 1);
+            findings.push({
+              id: `credentials-basic-auth-${index}`,
+              severity: "critical",
+              category: "credentials",
+              title: "HTTP Basic auth credentials found",
+              description: `Found a decodable HTTP Basic auth header in ${file.path}. Base64 is not encryption \u2014 the login and password are exposed in plain text to anyone who reads the file.`,
+              file: file.path,
+              line: findLineNumber(file, index),
+              evidence: `login=${maskSecretValue(login)} password=${maskSecretValue(password)}`,
+              fix: {
+                description: "Remove the header and load credentials at runtime",
+                before: "Authorization: Basic <redacted>",
+                after: "# provide credentials via environment/secret manager",
+                auto: false
+              }
+            });
+          }
+          return findings;
+        }
+      },
+      {
+        id: "credentials-weak-password",
+        name: "Weak or Common Password",
+        description: "Detects commonly used weak passwords assigned in configuration",
+        severity: "medium",
+        category: "credentials",
+        check(file) {
+          if (!isTextLikeFile(file)) return [];
+          const findings = [];
+          for (const match of findAllMatches2(file.content, PASSWORD_ASSIGNMENT)) {
+            const index = match.index ?? 0;
+            const password = match[1];
+            if (!COMMON_PASSWORDS.has(password.toLowerCase())) continue;
+            if (isLikelyExampleValue(file, index)) continue;
+            if (/["']/.test(match[0])) continue;
+            if (hasNearbyLogin(file.content, index)) continue;
+            findings.push({
+              id: `credentials-weak-password-${index}`,
+              severity: "medium",
+              category: "credentials",
+              title: "Weak password found",
+              description: `Found a commonly used weak password in ${file.path}. Weak credentials are trivially guessed and should be replaced with a strong, unique secret.`,
+              file: file.path,
+              line: findLineNumber(file, index),
+              evidence: `password=${maskSecretValue(password)}`
+            });
+          }
+          return findings;
+        }
+      }
+    ];
+  }
+});
+
+// src/rules/codes.ts
+var codeRules;
+var init_codes = __esm({
+  "src/rules/codes.ts"() {
+    "use strict";
+    init_helpers();
+    codeRules = [
+      {
+        id: "codes-otp",
+        name: "One-Time / 2FA Code",
+        description: "Detects OTP, TOTP, 2FA/MFA, and verification codes",
+        severity: "high",
+        category: "codes",
+        check(file) {
+          if (!isTextLikeFile(file)) return [];
+          const findings = [];
+          const pattern = /(?:otp|totp|2fa|mfa|one[-\s]?time(?:\s+code)?|verification\s*code|verification[_-]?code|auth(?:entication)?\s*code|sms[-\s]?code|код\s+подтверждения|смс[-\s]?код)\s*[=:]?\s*["']?(\d{4,8})["']?/gi;
+          for (const match of findAllMatches2(file.content, pattern)) {
+            const index = match.index ?? 0;
+            const code = match[1];
+            if (isLikelyExampleValue(file, index)) continue;
+            findings.push({
+              id: `codes-otp-${index}`,
+              severity: "high",
+              category: "codes",
+              title: "One-time / 2FA code found",
+              description: `Found a one-time/2FA code in ${file.path}. One-time codes can be replayed within their validity window to bypass multi-factor authentication.`,
+              file: file.path,
+              line: findLineNumber(file, index),
+              evidence: maskSecretValue(code)
+            });
+          }
+          return findings;
+        }
+      },
+      {
+        id: "codes-recovery",
+        name: "Recovery / Backup Codes",
+        description: "Detects lists of account recovery or backup codes",
+        severity: "high",
+        category: "codes",
+        check(file) {
+          if (!isTextLikeFile(file)) return [];
+          const findings = [];
+          const listPattern = /(?:recovery|backup|резервн\w*)\s*(?:codes?|коды?)\s*[=:]?\s*([A-Za-z0-9-]{4,}(?:[,\s]+[A-Za-z0-9-]{4,}){2,})/gi;
+          for (const match of findAllMatches2(file.content, listPattern)) {
+            const index = match.index ?? 0;
+            if (isLikelyExampleValue(file, index)) continue;
+            const codes = match[1].split(/[,\s]+/).filter(Boolean);
+            if (codes.length < 3) continue;
+            if (!codes.some((code) => /\d/.test(code))) continue;
+            if (!codes.every((code) => code.length >= 4 && code.length <= 20)) continue;
+            findings.push({
+              id: `codes-recovery-${index}`,
+              severity: "high",
+              category: "codes",
+              title: `Recovery/backup codes found (${codes.length})`,
+              description: `Found ${codes.length} account recovery/backup codes in ${file.path}. Recovery codes bypass MFA entirely and must be stored in a password manager, never in configuration or notes.`,
+              file: file.path,
+              line: findLineNumber(file, index),
+              evidence: `${codes.length} codes: ${maskSecretValue(codes[0])}, \u2026`
+            });
+          }
+          const singlePattern = /(?:recovery|backup)[_-]?code\s*[=:]\s*["']?([A-Za-z0-9-]{6,})["']?/gi;
+          for (const match of findAllMatches2(file.content, singlePattern)) {
+            const index = match.index ?? 0;
+            if (isLikelyExampleValue(file, index)) continue;
+            findings.push({
+              id: `codes-recovery-single-${index}`,
+              severity: "high",
+              category: "codes",
+              title: "Recovery code found",
+              description: `Found a recovery code in ${file.path}. Recovery codes bypass MFA and must not be stored in plain text.`,
+              file: file.path,
+              line: findLineNumber(file, index),
+              evidence: maskSecretValue(match[1])
+            });
+          }
+          return findings;
+        }
+      },
+      {
+        id: "codes-pin",
+        name: "PIN Code",
+        description: "Detects PIN codes assigned to a labeled key",
+        severity: "medium",
+        category: "codes",
+        check(file) {
+          if (!isTextLikeFile(file)) return [];
+          const findings = [];
+          const pattern = /(?:pin|пин)[-\s]?(?:code|код)?\s*[=:]\s*["']?(\d{4,8})["']?/gi;
+          for (const match of findAllMatches2(file.content, pattern)) {
+            const index = match.index ?? 0;
+            if (isLikelyExampleValue(file, index)) continue;
+            findings.push({
+              id: `codes-pin-${index}`,
+              severity: "medium",
+              category: "codes",
+              title: "PIN code found",
+              description: `Found a PIN code in ${file.path}. PINs are short secrets that must not be stored in configuration or notes.`,
+              file: file.path,
+              line: findLineNumber(file, index),
+              evidence: maskSecretValue(match[1])
+            });
           }
           return findings;
         }
@@ -1238,8 +2958,8 @@ var init_permission_entries = __esm({
 
 // src/rules/permissions.ts
 import { statSync as statSync2 } from "fs";
-import { resolve, join as join2 } from "path";
-import { homedir } from "os";
+import { resolve as resolve2, join as join3 } from "path";
+import { homedir as homedir2 } from "os";
 function isHookManifestConfig(file, config) {
   if (!/(^|[\\/])hooks[\\/][^\\/]+\.json$/i.test(file.path)) return false;
   if (!config || typeof config !== "object") return false;
@@ -1367,7 +3087,7 @@ function hasOnlyExactAllowEntries(allowEntries) {
 }
 function resolveClaudeMdPath(relativePath) {
   if (/^\.claude\/CLAUDE\.md$/i.test(relativePath)) {
-    const homeClaudeMd = join2(homedir(), ".claude", "CLAUDE.md");
+    const homeClaudeMd = join3(homedir2(), ".claude", "CLAUDE.md");
     try {
       statSync2(homeClaudeMd);
       return homeClaudeMd;
@@ -1375,7 +3095,7 @@ function resolveClaudeMdPath(relativePath) {
     }
   }
   try {
-    const resolved = resolve(relativePath);
+    const resolved = resolve2(relativePath);
     statSync2(resolved);
     return resolved;
   } catch {
@@ -12284,7 +14004,7 @@ var init_hermes = __esm({
 
 // src/rules/claude-code.ts
 import { basename as basename5 } from "path";
-import { homedir as homedir2 } from "os";
+import { homedir as homedir3 } from "os";
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -12325,7 +14045,7 @@ function isManagedSettingsPath(filePath) {
 }
 function isUserScopeSettingsPath(filePath) {
   const normalized = normalizePath5(filePath);
-  const home = normalizePath5(homedir2());
+  const home = normalizePath5(homedir3());
   if (home && normalized.startsWith(`${home}/.claude/`)) return true;
   if (/^~\/\.claude\//.test(normalized)) return true;
   return /^\/(?:Users|home)\/[^/]+\/\.claude\/[^/]+\.json$/.test(normalized);
@@ -14777,6 +16497,9 @@ __export(rules_exports, {
 function getBuiltinRules() {
   return [
     ...secretRules,
+    ...piiRules,
+    ...credentialRules,
+    ...codeRules,
     ...permissionRules,
     ...hookRules,
     ...mcpRules,
@@ -14797,6 +16520,9 @@ var init_rules = __esm({
   "src/rules/index.ts"() {
     "use strict";
     init_secrets();
+    init_pii();
+    init_credentials();
+    init_codes();
     init_permissions();
     init_hooks();
     init_mcp();
@@ -14815,8 +16541,8 @@ var init_rules = __esm({
 });
 
 // src/harness-adapters/index.ts
-import { existsSync as existsSync2, statSync as statSync3 } from "fs";
-import { join as join3 } from "path";
+import { existsSync as existsSync3, statSync as statSync3 } from "fs";
+import { join as join4 } from "path";
 function getHarnessAdapterRegistry() {
   return ADAPTERS.map(({ markers: _markers, ...metadata }) => metadata);
 }
@@ -14845,8 +16571,8 @@ function detectAdapter(rootPath, adapter) {
 }
 function markerExists(rootPath, marker) {
   try {
-    const fullPath = join3(rootPath, marker.path);
-    if (!existsSync2(fullPath)) return false;
+    const fullPath = join4(rootPath, marker.path);
+    if (!existsSync3(fullPath)) return false;
     const stats = statSync3(fullPath);
     switch (marker.kind) {
       case "file":
@@ -15291,8 +17017,8 @@ var OPT_IN_ENV_VARS, OPT_OUT_ENV_VARS, PRO_URL, PRO_CTA_PLAIN, PRO_CTA_MARKDOWN;
 var init_cta = __esm({
   "src/reporter/cta.ts"() {
     "use strict";
-    OPT_IN_ENV_VARS = ["ECC_CTA", "AGENTSHIELD_CTA"];
-    OPT_OUT_ENV_VARS = ["ECC_NO_CTA", "AGENTSHIELD_NO_CTA"];
+    OPT_IN_ENV_VARS = ["DATASHIELD_CTA", "ECC_CTA", "AGENTSHIELD_CTA"];
+    OPT_OUT_ENV_VARS = ["DATASHIELD_NO_CTA", "ECC_NO_CTA", "AGENTSHIELD_NO_CTA"];
     PRO_URL = "https://github.com/apps/ecc-tools";
     PRO_CTA_PLAIN = `Scans run locally; nothing leaves your machine. Track fleet posture and drift over time with ECC Tools Pro: ${PRO_URL}`;
     PRO_CTA_MARKDOWN = `_Scans run locally; nothing leaves your machine. Track fleet posture and drift over time with [ECC Tools Pro](${PRO_URL})._`;
@@ -15818,7 +17544,7 @@ __export(remediation_exports, {
   writeRemediationPlan: () => writeRemediationPlan
 });
 import { mkdirSync, writeFileSync } from "fs";
-import { dirname as dirname2, resolve as resolve2 } from "path";
+import { dirname as dirname2, resolve as resolve3 } from "path";
 function buildRemediationPlan(report, options = {}) {
   const findings = [...report.findings].sort(compareFindings).map((finding) => toPlanFinding(finding));
   return {
@@ -15840,7 +17566,7 @@ function buildRemediationPlan(report, options = {}) {
   };
 }
 function writeRemediationPlan(options) {
-  const outputPath = resolve2(options.outputPath);
+  const outputPath = resolve3(options.outputPath);
   const plan = buildRemediationPlan(options.report, {
     generatedAt: options.generatedAt
   });
@@ -17006,7 +18732,7 @@ var init_injection = __esm({
 // src/sandbox/executor.ts
 import { spawn } from "child_process";
 import { mkdtemp, readdir, stat as stat2, readFile, rm as rm2 } from "fs/promises";
-import { join as join9 } from "path";
+import { join as join10 } from "path";
 import { tmpdir } from "os";
 function parseHooksObject(settingsContent) {
   let config;
@@ -17057,7 +18783,7 @@ function hasHookDefinitions(settingsContent) {
 async function executeHookInSandbox(hookCommand, options = {}) {
   const opts = { ...DEFAULT_OPTIONS, ...options };
   const fakeEnv = { ...DEFAULT_FAKE_ENV, ...opts.fakeEnv };
-  const workDir = await mkdtemp(join9(tmpdir(), "agentshield-sandbox-"));
+  const workDir = await mkdtemp(join10(tmpdir(), "agentshield-sandbox-"));
   const sandboxEnv = {
     HOME: workDir,
     TMPDIR: workDir,
@@ -17076,7 +18802,7 @@ async function executeHookInSandbox(hookCommand, options = {}) {
     controller.abort();
   }, opts.timeout);
   try {
-    const result = await new Promise((resolve11) => {
+    const result = await new Promise((resolve12) => {
       const stdoutChunks = [];
       const stderrChunks = [];
       const child = spawn(hookCommand, [], {
@@ -17093,7 +18819,7 @@ async function executeHookInSandbox(hookCommand, options = {}) {
         stderrChunks.push(chunk);
       });
       child.on("close", (code) => {
-        resolve11({
+        resolve12({
           exitCode: code,
           stdout: Buffer.concat(stdoutChunks).toString("utf-8"),
           stderr: Buffer.concat(stderrChunks).toString("utf-8")
@@ -17101,13 +18827,13 @@ async function executeHookInSandbox(hookCommand, options = {}) {
       });
       child.on("error", (err) => {
         if (err.code === "ABORT_ERR" || err.name === "AbortError") {
-          resolve11({
+          resolve12({
             exitCode: null,
             stdout: Buffer.concat(stdoutChunks).toString("utf-8"),
             stderr: Buffer.concat(stderrChunks).toString("utf-8")
           });
         } else {
-          resolve11({
+          resolve12({
             exitCode: null,
             stdout: Buffer.concat(stdoutChunks).toString("utf-8"),
             stderr: Buffer.concat(stderrChunks).toString("utf-8") + `
@@ -17230,7 +18956,7 @@ async function detectFileWrites(workDir, observations) {
   try {
     const entries = await readdir(workDir);
     for (const entry of entries) {
-      const entryPath = join9(workDir, entry);
+      const entryPath = join10(workDir, entry);
       const entryStat = await stat2(entryPath);
       if (entryStat.isFile()) {
         const content = await readFile(entryPath, "utf-8");
@@ -18655,13 +20381,13 @@ var init_corpus = __esm({
 });
 
 // src/policy/types.ts
-import { z as z3 } from "zod";
+import { z as z4 } from "zod";
 var SeveritySchema2, PolicyPackSchema, PolicyExceptionSchema, OrgPolicySchema;
 var init_types = __esm({
   "src/policy/types.ts"() {
     "use strict";
-    SeveritySchema2 = z3.enum(["critical", "high", "medium", "low", "info"]);
-    PolicyPackSchema = z3.enum([
+    SeveritySchema2 = z4.enum(["critical", "high", "medium", "low", "info"]);
+    PolicyPackSchema = z4.enum([
       "oss",
       "team",
       "enterprise",
@@ -18669,41 +20395,41 @@ var init_types = __esm({
       "high-risk-hooks-mcp",
       "ci-enforcement"
     ]);
-    PolicyExceptionSchema = z3.object({
-      id: z3.string().min(1),
-      rule: z3.string().min(1),
-      owner: z3.string().min(1),
-      reason: z3.string().min(1),
-      expires_at: z3.string().datetime(),
-      scope: z3.string().optional(),
+    PolicyExceptionSchema = z4.object({
+      id: z4.string().min(1),
+      rule: z4.string().min(1),
+      owner: z4.string().min(1),
+      reason: z4.string().min(1),
+      expires_at: z4.string().datetime(),
+      scope: z4.string().optional(),
       severity: SeveritySchema2.optional(),
-      ticket: z3.string().optional()
+      ticket: z4.string().optional()
     });
-    OrgPolicySchema = z3.object({
-      version: z3.literal(1),
-      name: z3.string().optional(),
-      description: z3.string().optional(),
+    OrgPolicySchema = z4.object({
+      version: z4.literal(1),
+      name: z4.string().optional(),
+      description: z4.string().optional(),
       policy_pack: PolicyPackSchema.default("team"),
-      owners: z3.array(z3.string()).default([]),
-      exceptions: z3.array(PolicyExceptionSchema).default([]),
+      owners: z4.array(z4.string()).default([]),
+      exceptions: z4.array(PolicyExceptionSchema).default([]),
       /** Items that MUST appear in the permissions.deny list */
-      required_deny_list: z3.array(z3.string()).default([]),
+      required_deny_list: z4.array(z4.string()).default([]),
       /** MCP servers that are banned from use */
-      banned_mcp_servers: z3.array(z3.string()).default([]),
+      banned_mcp_servers: z4.array(z4.string()).default([]),
       /** Minimum acceptable security score (0-100) */
-      min_score: z3.number().int().min(0).max(100).default(60),
+      min_score: z4.number().int().min(0).max(100).default(60),
       /** Maximum allowed severity for any single finding */
       max_severity: SeveritySchema2.default("critical"),
       /** Hook patterns that must be present in settings */
-      required_hooks: z3.array(
-        z3.object({
-          event: z3.enum(["PreToolUse", "PostToolUse", "SessionStart", "Stop"]),
-          pattern: z3.string(),
-          description: z3.string().optional()
+      required_hooks: z4.array(
+        z4.object({
+          event: z4.enum(["PreToolUse", "PostToolUse", "SessionStart", "Stop"]),
+          pattern: z4.string(),
+          description: z4.string().optional()
         })
       ).default([]),
       /** Tools that must NOT appear in the allow list */
-      banned_tools: z3.array(z3.string()).default([])
+      banned_tools: z4.array(z4.string()).default([])
     });
   }
 });
@@ -18851,13 +20577,13 @@ var init_presets = __esm({
 });
 
 // src/policy/evaluate.ts
-import { readFileSync as readFileSync8, existsSync as existsSync11 } from "fs";
+import { readFileSync as readFileSync9, existsSync as existsSync12 } from "fs";
 function loadPolicy2(policyPath) {
-  if (!existsSync11(policyPath)) {
+  if (!existsSync12(policyPath)) {
     return { success: false, error: `Policy file not found: ${policyPath}` };
   }
   try {
-    const raw = readFileSync8(policyPath, "utf-8");
+    const raw = readFileSync9(policyPath, "utf-8");
     const parsed = JSON.parse(raw);
     return { success: true, policy: OrgPolicySchema.parse(parsed) };
   } catch (error) {
@@ -19255,7 +20981,7 @@ var init_evaluate = __esm({
 // src/policy/export.ts
 import { createHash as createHash4 } from "crypto";
 import { mkdirSync as mkdirSync6, writeFileSync as writeFileSync6 } from "fs";
-import { join as join10 } from "path";
+import { join as join11 } from "path";
 function exportPolicyPacks(options) {
   mkdirSync6(options.outputDir, { recursive: true });
   const summaries = listPolicyPacks();
@@ -19272,7 +20998,7 @@ function exportPolicyPacks(options) {
     });
     const policyJson = stableJson(policy);
     const file = `${packId}-policy.json`;
-    writeFileSync6(join10(options.outputDir, file), policyJson);
+    writeFileSync6(join11(options.outputDir, file), policyJson);
     entries.push({
       id: summary.id,
       label: summary.label,
@@ -19285,7 +21011,7 @@ function exportPolicyPacks(options) {
     schema_version: POLICY_EXPORT_SCHEMA_VERSION,
     packs: entries
   };
-  writeFileSync6(join10(options.outputDir, "manifest.json"), stableJson(manifest));
+  writeFileSync6(join11(options.outputDir, "manifest.json"), stableJson(manifest));
   return manifest;
 }
 function stableJson(value) {
@@ -19310,24 +21036,24 @@ var init_export = __esm({
 // src/policy/promote.ts
 import { createHash as createHash5 } from "crypto";
 import {
-  existsSync as existsSync12,
+  existsSync as existsSync13,
   mkdirSync as mkdirSync7,
-  readFileSync as readFileSync9,
+  readFileSync as readFileSync10,
   writeFileSync as writeFileSync7
 } from "fs";
 import {
   dirname as dirname5,
-  isAbsolute,
-  join as join11
+  isAbsolute as isAbsolute2,
+  join as join12
 } from "path";
 function promotePolicyPack(options) {
   const manifest = readExportManifest(options.manifestPath);
   const entry = selectPolicyPack(manifest.packs, options.pack);
-  const sourceFile = isAbsolute(entry.file) ? entry.file : join11(dirname5(options.manifestPath), entry.file);
-  if (!existsSync12(sourceFile)) {
+  const sourceFile = isAbsolute2(entry.file) ? entry.file : join12(dirname5(options.manifestPath), entry.file);
+  if (!existsSync13(sourceFile)) {
     throw new Error(`Policy file not found: ${sourceFile}`);
   }
-  const policyJson = readFileSync9(sourceFile, "utf-8");
+  const policyJson = readFileSync10(sourceFile, "utf-8");
   const actualDigest = digest2(policyJson);
   if (actualDigest !== entry.sha256) {
     throw new Error(
@@ -19413,10 +21139,10 @@ function buildPromotionReviewItems(options) {
   ];
 }
 function readExportManifest(manifestPath) {
-  if (!existsSync12(manifestPath)) {
+  if (!existsSync13(manifestPath)) {
     throw new Error(`Policy export manifest not found: ${manifestPath}`);
   }
-  const raw = JSON.parse(readFileSync9(manifestPath, "utf-8"));
+  const raw = JSON.parse(readFileSync10(manifestPath, "utf-8"));
   if (raw.schema_version !== POLICY_EXPORT_SCHEMA_VERSION) {
     throw new Error(
       `Unsupported policy export manifest schema: ${String(raw.schema_version)}`
@@ -19517,7 +21243,7 @@ var init_types2 = __esm({
 });
 
 // src/baseline/compare.ts
-import { readFileSync as readFileSync10, writeFileSync as writeFileSync8, existsSync as existsSync13 } from "fs";
+import { readFileSync as readFileSync11, writeFileSync as writeFileSync8, existsSync as existsSync14 } from "fs";
 import { dirname as dirname6 } from "path";
 import { mkdirSync as mkdirSync8 } from "fs";
 function saveBaseline(findings, score, outputPath) {
@@ -19535,15 +21261,15 @@ function saveBaseline(findings, score, outputPath) {
     }))
   };
   const dir = dirname6(outputPath);
-  if (!existsSync13(dir)) {
+  if (!existsSync14(dir)) {
     mkdirSync8(dir, { recursive: true });
   }
   writeFileSync8(outputPath, JSON.stringify(serialized, null, 2));
 }
 function loadBaseline(baselinePath) {
-  if (!existsSync13(baselinePath)) return null;
+  if (!existsSync14(baselinePath)) return null;
   try {
-    const raw = readFileSync10(baselinePath, "utf-8");
+    const raw = readFileSync11(baselinePath, "utf-8");
     const parsed = JSON.parse(raw);
     if (parsed.version !== 1 || !Array.isArray(parsed.findings)) {
       return null;
@@ -20416,17 +22142,25 @@ var init_supply_chain = __esm({
 
 // src/index.ts
 init_scanner();
+init_scan_config();
 import { Command } from "commander";
-import { resolve as resolve10 } from "path";
-import { dirname as dirname7, join as join12 } from "path";
-import { existsSync as existsSync14, writeFileSync as writeFileSync9, appendFileSync as appendFileSync2, mkdirSync as mkdirSync9 } from "fs";
+import { resolve as resolve11 } from "path";
+import { dirname as dirname7, join as join13 } from "path";
+import { existsSync as existsSync15, writeFileSync as writeFileSync9, appendFileSync as appendFileSync2, mkdirSync as mkdirSync9 } from "fs";
 
 // src/rules/external.ts
-import { existsSync as existsSync3, readFileSync as readFileSync2 } from "fs";
-import { z } from "zod";
+init_detection();
+import { existsSync as existsSync4, readFileSync as readFileSync3 } from "fs";
+import { z as z2 } from "zod";
+var SENSITIVE_CATEGORIES = /* @__PURE__ */ new Set([
+  "secrets",
+  "pii",
+  "credentials",
+  "codes"
+]);
 var MAX_FINDINGS_PER_RULE_PER_FILE = 200;
-var SeveritySchema = z.enum(["critical", "high", "medium", "low", "info"]);
-var CategorySchema = z.enum([
+var SeveritySchema = z2.enum(["critical", "high", "medium", "low", "info"]);
+var CategorySchema = z2.enum([
   "secrets",
   "permissions",
   "hooks",
@@ -20436,23 +22170,26 @@ var CategorySchema = z.enum([
   "injection",
   "exposure",
   "exfiltration",
-  "misconfiguration"
+  "misconfiguration",
+  "pii",
+  "credentials",
+  "codes"
 ]);
-var RulePackEntrySchema = z.object({
-  id: z.string().min(1),
-  name: z.string().min(1),
-  description: z.string().optional(),
+var RulePackEntrySchema = z2.object({
+  id: z2.string().min(1),
+  name: z2.string().min(1),
+  description: z2.string().optional(),
   severity: SeveritySchema,
   category: CategorySchema,
-  patterns: z.array(z.string().min(1)).min(1),
-  flags: z.string().optional(),
-  fileTypes: z.array(z.string()).optional()
+  patterns: z2.array(z2.string().min(1)).min(1),
+  flags: z2.string().optional(),
+  fileTypes: z2.array(z2.string()).optional()
 });
-var RulePackSchema = z.object({
-  version: z.literal(1),
-  name: z.string().optional(),
-  description: z.string().optional(),
-  rules: z.array(RulePackEntrySchema).min(1)
+var RulePackSchema = z2.object({
+  version: z2.literal(1),
+  name: z2.string().optional(),
+  description: z2.string().optional(),
+  rules: z2.array(RulePackEntrySchema).min(1)
 });
 function findLineNumber10(content, matchIndex) {
   return content.substring(0, matchIndex).split("\n").length;
@@ -20491,7 +22228,7 @@ function entryToRule(entry, compiled) {
             description: `${entry.description ?? entry.name} (external rule ${entry.id}).`,
             file: file.path,
             line: findLineNumber10(file.content, match.index ?? 0),
-            evidence: match[0].substring(0, 100)
+            evidence: SENSITIVE_CATEGORIES.has(entry.category) ? maskSensitive(match[0]) : match[0].substring(0, 100)
           });
           seq += 1;
           if (findings.length >= MAX_FINDINGS_PER_RULE_PER_FILE) return findings;
@@ -20502,12 +22239,12 @@ function entryToRule(entry, compiled) {
   };
 }
 function loadRulePack(rulePackPath) {
-  if (!existsSync3(rulePackPath)) {
+  if (!existsSync4(rulePackPath)) {
     return { success: false, error: `Rule pack not found: ${rulePackPath}` };
   }
   let pack;
   try {
-    pack = RulePackSchema.parse(JSON.parse(readFileSync2(rulePackPath, "utf-8")));
+    pack = RulePackSchema.parse(JSON.parse(readFileSync3(rulePackPath, "utf-8")));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { success: false, error: `Invalid rule pack ${rulePackPath}: ${message}` };
@@ -21172,6 +22909,25 @@ function truncate3(text, max) {
   return single.length > max ? `${single.slice(0, max - 3)}...` : single;
 }
 
+// src/reporter/redact.ts
+init_detection();
+var SENSITIVE_CATEGORIES2 = /* @__PURE__ */ new Set([
+  "secrets",
+  "pii",
+  "credentials",
+  "codes"
+]);
+function isSensitiveCategory(category) {
+  return SENSITIVE_CATEGORIES2.has(category);
+}
+function redactSensitiveFinding(finding) {
+  if (!finding.fix || !isSensitiveCategory(finding.category)) return finding;
+  return {
+    ...finding,
+    fix: { ...finding.fix, before: maskSensitive(finding.fix.before) }
+  };
+}
+
 // src/reporter/score.ts
 var SCORE_DEDUCTIONS = {
   critical: 25,
@@ -21198,7 +22954,8 @@ function calculateScore(result) {
   return {
     timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     targetPath: target.path,
-    findings,
+    // Defense in depth: never emit a raw secret/PII value in fix metadata.
+    findings: findings.map(redactSensitiveFinding),
     score,
     summary,
     defenses,
@@ -21295,8 +23052,16 @@ function mapToScoreCategory(category) {
     // prompt injection → agents category
     exposure: "hooks",
     // data exposure via hooks/exfiltration
-    misconfiguration: "permissions"
+    exfiltration: "secrets",
+    // outbound data loss → secrets/data-exposure
+    misconfiguration: "permissions",
     // config issues → permissions
+    pii: "secrets",
+    // personal data is data exposure
+    credentials: "secrets",
+    // logins/passwords are data exposure
+    codes: "secrets"
+    // one-time codes are data exposure
   };
   return mapping[category] ?? "agents";
 }
@@ -22660,9 +24425,9 @@ function normalizeUri(uri) {
 // src/evidence-pack/index.ts
 init_remediation();
 import { createHash as createHash2 } from "crypto";
-import { existsSync as existsSync4, mkdirSync as mkdirSync2, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "fs";
-import { basename as basename7, join as join4, resolve as resolve3 } from "path";
-import { homedir as homedir3 } from "os";
+import { existsSync as existsSync5, mkdirSync as mkdirSync2, readFileSync as readFileSync4, writeFileSync as writeFileSync2 } from "fs";
+import { basename as basename7, join as join5, resolve as resolve4 } from "path";
+import { homedir as homedir4 } from "os";
 var ARTIFACTS = [
   {
     file: "manifest.json",
@@ -22717,7 +24482,7 @@ var ARTIFACTS = [
 ];
 var BUNDLE_DIGEST_EXCLUDED_FILES = /* @__PURE__ */ new Set(["manifest.json", "README.md"]);
 function writeEvidencePack(options) {
-  const outputDir = resolve3(options.outputDir);
+  const outputDir = resolve4(options.outputDir);
   const generatedAt = options.generatedAt ?? (/* @__PURE__ */ new Date()).toISOString();
   const redacted = options.redact ?? true;
   const redactor = createRedactor(options.report.targetPath, redacted);
@@ -22777,10 +24542,10 @@ function writeEvidencePack(options) {
   };
 }
 function verifyEvidencePack(outputDir) {
-  const resolvedOutputDir = resolve3(outputDir);
-  const manifestPath = resolve3(resolvedOutputDir, "manifest.json");
+  const resolvedOutputDir = resolve4(outputDir);
+  const manifestPath = resolve4(resolvedOutputDir, "manifest.json");
   const errors = [];
-  if (!existsSync4(manifestPath)) {
+  if (!existsSync5(manifestPath)) {
     return {
       ok: false,
       outputDir: resolvedOutputDir,
@@ -22792,7 +24557,7 @@ function verifyEvidencePack(outputDir) {
   }
   let manifest;
   try {
-    manifest = JSON.parse(readFileSync3(manifestPath, "utf-8"));
+    manifest = JSON.parse(readFileSync4(manifestPath, "utf-8"));
   } catch (error) {
     return {
       ok: false,
@@ -22805,7 +24570,7 @@ function verifyEvidencePack(outputDir) {
   }
   const artifactContents = /* @__PURE__ */ new Map();
   const artifacts = manifest.artifacts.map((artifact) => {
-    const artifactPath = resolve3(resolvedOutputDir, artifact.file);
+    const artifactPath = resolve4(resolvedOutputDir, artifact.file);
     if (artifact.file === "manifest.json") {
       return {
         file: artifact.file,
@@ -22816,7 +24581,7 @@ function verifyEvidencePack(outputDir) {
         actualBytes: null
       };
     }
-    if (!existsSync4(artifactPath)) {
+    if (!existsSync5(artifactPath)) {
       errors.push(`${artifact.file} is missing`);
       return {
         file: artifact.file,
@@ -22827,7 +24592,7 @@ function verifyEvidencePack(outputDir) {
         actualBytes: null
       };
     }
-    const content = readFileSync3(artifactPath, "utf-8");
+    const content = readFileSync4(artifactPath, "utf-8");
     artifactContents.set(artifact.file, content);
     const actual = hashContent(content);
     const ok = actual.sha256 === artifact.sha256 && actual.bytes === artifact.bytes;
@@ -22857,7 +24622,7 @@ function verifyEvidencePack(outputDir) {
   };
 }
 function inspectEvidencePack(outputDir) {
-  const resolvedOutputDir = resolve3(outputDir);
+  const resolvedOutputDir = resolve4(outputDir);
   const verification = verifyEvidencePack(resolvedOutputDir);
   const errors = [...verification.errors];
   const manifest = readJsonFile(resolvedOutputDir, "manifest.json", errors);
@@ -23118,20 +24883,20 @@ function determineFleetReviewPriority(route) {
 }
 function buildFleetReviewEvidencePaths(entry) {
   const paths = [
-    join4(entry.outputDir, "manifest.json"),
-    join4(entry.outputDir, "agentshield-report.json")
+    join5(entry.outputDir, "manifest.json"),
+    join5(entry.outputDir, "agentshield-report.json")
   ];
   if (entry.policyStatus !== "not-run" && entry.policyStatus !== "unknown") {
-    paths.push(join4(entry.outputDir, "policy-evaluation.json"));
+    paths.push(join5(entry.outputDir, "policy-evaluation.json"));
   }
   if (entry.baselineStatus !== "not-run" && entry.baselineStatus !== "unknown") {
-    paths.push(join4(entry.outputDir, "baseline-comparison.json"));
+    paths.push(join5(entry.outputDir, "baseline-comparison.json"));
   }
   if (entry.riskyPackages > 0 || entry.route === "supply-chain-review" || entry.route === "security-blocker") {
-    paths.push(join4(entry.outputDir, "supply-chain.json"));
+    paths.push(join5(entry.outputDir, "supply-chain.json"));
   }
   if (entry.autoFixable > 0 || entry.manualReview > 0) {
-    paths.push(join4(entry.outputDir, "remediation-plan.json"));
+    paths.push(join5(entry.outputDir, "remediation-plan.json"));
   }
   return Array.from(new Set(paths));
 }
@@ -23349,7 +25114,7 @@ function compact(value) {
   return Object.fromEntries(entries);
 }
 function writeText(outputDir, fileName, content) {
-  writeFileSync2(resolve3(outputDir, fileName), normalizeText(content));
+  writeFileSync2(resolve4(outputDir, fileName), normalizeText(content));
 }
 function normalizeText(content) {
   return content.endsWith("\n") ? content : `${content}
@@ -23375,13 +25140,13 @@ function buildBundleDigest(artifactContents) {
   return `sha256:${createHash2("sha256").update(JSON.stringify(bundleEntries)).digest("hex")}`;
 }
 function readJsonFile(outputDir, fileName, errors) {
-  const filePath = resolve3(outputDir, fileName);
-  if (!existsSync4(filePath)) {
+  const filePath = resolve4(outputDir, fileName);
+  if (!existsSync5(filePath)) {
     errors.push(`${fileName} is missing`);
     return null;
   }
   try {
-    return JSON.parse(readFileSync3(filePath, "utf-8"));
+    return JSON.parse(readFileSync4(filePath, "utf-8"));
   } catch (error) {
     errors.push(`${fileName} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
     return null;
@@ -23554,9 +25319,9 @@ function createRedactor(targetPath, enabled) {
   };
 }
 function buildReplacements(targetPath) {
-  const home = homedir3();
+  const home = homedir4();
   const targetReplacements = targetPath ? [
-    ...pathPatterns(resolve3(targetPath)).map((pattern) => [pattern, "<target-path>"]),
+    ...pathPatterns(resolve4(targetPath)).map((pattern) => [pattern, "<target-path>"]),
     ...pathPatterns(targetPath).map((pattern) => [pattern, "<target-path>"])
   ] : [];
   const homeReplacements = home && home !== "/" ? pathPatterns(home).map((pattern) => [pattern, "<home>"]) : [];
@@ -24341,8 +26106,8 @@ function renderInlineScore(score) {
 }
 
 // src/fixer/index.ts
-import { readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "fs";
-import { resolve as resolve4 } from "path";
+import { readFileSync as readFileSync5, writeFileSync as writeFileSync3 } from "fs";
+import { resolve as resolve5 } from "path";
 import { createHash as createHash3 } from "crypto";
 
 // src/fixer/transforms.ts
@@ -24423,10 +26188,10 @@ function applyFixes(scanResult) {
   const applied = [];
   const skipped = [];
   for (const [relPath, findings] of grouped) {
-    const filePath = resolve4(scanResult.target.path, relPath);
+    const filePath = resolve5(scanResult.target.path, relPath);
     let content;
     try {
-      content = readFileSync4(filePath, "utf-8");
+      content = readFileSync5(filePath, "utf-8");
     } catch {
       for (const finding of findings) {
         skipped.push({
@@ -24486,10 +26251,10 @@ function applyFixesVerified(scanResult, options) {
   const { scoreBefore, rescan, score, version = "unknown" } = options;
   const snapshots = /* @__PURE__ */ new Map();
   for (const finding of getAutoFixableFindings(scanResult.findings)) {
-    const filePath = resolve4(scanResult.target.path, finding.file);
+    const filePath = resolve5(scanResult.target.path, finding.file);
     if (!snapshots.has(filePath)) {
       try {
-        snapshots.set(filePath, readFileSync4(filePath, "utf-8"));
+        snapshots.set(filePath, readFileSync5(filePath, "utf-8"));
       } catch {
       }
     }
@@ -24654,7 +26419,10 @@ var CONTROL_MAP = {
     injection: [{ id: "CC7.1", title: "Detection of security events" }, { id: "CC8.1", title: "Change management" }],
     exposure: [{ id: "CC6.1", title: "Logical access security" }],
     exfiltration: [{ id: "CC6.7", title: "Restricted data transmission" }],
-    misconfiguration: [{ id: "CC7.1", title: "Detection of security events" }]
+    misconfiguration: [{ id: "CC7.1", title: "Detection of security events" }],
+    pii: [{ id: "CC6.1", title: "Logical access security" }, { id: "CC6.7", title: "Restricted data transmission" }],
+    credentials: [{ id: "CC6.1", title: "Logical access - credentials" }, { id: "CC6.3", title: "Access credentials managed" }],
+    codes: [{ id: "CC6.1", title: "Logical access security" }, { id: "CC6.3", title: "Access credentials managed" }]
   },
   pci: {
     secrets: [{ id: "Req 3", title: "Protect stored account data" }, { id: "Req 8", title: "Identify and authenticate access" }],
@@ -24666,7 +26434,10 @@ var CONTROL_MAP = {
     injection: [{ id: "Req 6.2", title: "Secure software development" }],
     exposure: [{ id: "Req 3", title: "Protect stored account data" }],
     exfiltration: [{ id: "Req 4", title: "Protect data in transmission" }, { id: "Req 1", title: "Network security controls" }],
-    misconfiguration: [{ id: "Req 2", title: "Secure configurations" }]
+    misconfiguration: [{ id: "Req 2", title: "Secure configurations" }],
+    pii: [{ id: "Req 3", title: "Protect stored account data" }, { id: "Req 4", title: "Protect data in transmission" }],
+    credentials: [{ id: "Req 8", title: "Identify and authenticate access" }],
+    codes: [{ id: "Req 8", title: "Identify and authenticate access" }]
   },
   iso: {
     secrets: [{ id: "A.5.17", title: "Authentication information" }, { id: "A.8.24", title: "Use of cryptography" }],
@@ -24678,7 +26449,10 @@ var CONTROL_MAP = {
     injection: [{ id: "A.8.28", title: "Secure coding" }],
     exposure: [{ id: "A.8.12", title: "Data leakage prevention" }],
     exfiltration: [{ id: "A.8.12", title: "Data leakage prevention" }],
-    misconfiguration: [{ id: "A.8.9", title: "Configuration management" }]
+    misconfiguration: [{ id: "A.8.9", title: "Configuration management" }],
+    pii: [{ id: "A.5.34", title: "Privacy and protection of PII" }, { id: "A.8.12", title: "Data leakage prevention" }],
+    credentials: [{ id: "A.5.17", title: "Authentication information" }],
+    codes: [{ id: "A.5.17", title: "Authentication information" }]
   }
 };
 var SEVERITY_RANK2 = {
@@ -24771,8 +26545,8 @@ function renderComplianceReport(report) {
 }
 
 // src/init/index.ts
-import { existsSync as existsSync5, mkdirSync as mkdirSync3, writeFileSync as writeFileSync4 } from "fs";
-import { join as join5, resolve as resolve5 } from "path";
+import { existsSync as existsSync6, mkdirSync as mkdirSync3, writeFileSync as writeFileSync4 } from "fs";
+import { join as join6, resolve as resolve6 } from "path";
 function getDefaultSettings() {
   const settings = {
     permissions: {
@@ -24873,7 +26647,7 @@ function getDefaultMcpConfig() {
   return JSON.stringify(config, null, 2);
 }
 function safeWriteFile(filePath, content) {
-  if (existsSync5(filePath)) {
+  if (existsSync6(filePath)) {
     return {
       path: filePath,
       status: "skipped",
@@ -24887,20 +26661,20 @@ function safeWriteFile(filePath, content) {
   };
 }
 function runInit(targetDir) {
-  const baseDir = targetDir ? resolve5(targetDir) : resolve5(process.cwd());
-  const claudeDir = join5(baseDir, ".claude");
-  if (!existsSync5(claudeDir)) {
+  const baseDir = targetDir ? resolve6(targetDir) : resolve6(process.cwd());
+  const claudeDir = join6(baseDir, ".claude");
+  if (!existsSync6(claudeDir)) {
     mkdirSync3(claudeDir, { recursive: true });
   }
   const files = [];
   files.push(
-    safeWriteFile(join5(claudeDir, "settings.json"), getDefaultSettings())
+    safeWriteFile(join6(claudeDir, "settings.json"), getDefaultSettings())
   );
   files.push(
-    safeWriteFile(join5(claudeDir, "CLAUDE.md"), getDefaultClaudeMd())
+    safeWriteFile(join6(claudeDir, "CLAUDE.md"), getDefaultClaudeMd())
   );
   files.push(
-    safeWriteFile(join5(claudeDir, "mcp.json"), getDefaultMcpConfig())
+    safeWriteFile(join6(claudeDir, "mcp.json"), getDefaultMcpConfig())
   );
   return {
     directory: claudeDir,
@@ -24984,11 +26758,11 @@ var DEFAULT_SERVER_CONFIG = {
 
 // src/miniclaw/sandbox.ts
 import { mkdir, rm, stat, realpath, access } from "fs/promises";
-import { join as join6, resolve as resolve6, relative as relative2, extname as extname3, sep } from "path";
+import { join as join7, resolve as resolve7, relative as relative2, extname as extname3, sep } from "path";
 import { randomUUID } from "crypto";
 async function createSandbox(config = DEFAULT_SANDBOX_CONFIG, allowedTools = [], maxDuration) {
   const sessionId = randomUUID();
-  const sandboxPath = join6(config.rootPath, sessionId);
+  const sandboxPath = join7(config.rootPath, sessionId);
   await mkdir(config.rootPath, { recursive: true, mode: 448 });
   await mkdir(sandboxPath, { mode: 448 });
   const session = {
@@ -25001,8 +26775,8 @@ async function createSandbox(config = DEFAULT_SANDBOX_CONFIG, allowedTools = [],
   return session;
 }
 async function destroySandbox(sandboxPath, rootPath) {
-  const normalizedSandbox = resolve6(sandboxPath);
-  const normalizedRoot = resolve6(rootPath);
+  const normalizedSandbox = resolve7(sandboxPath);
+  const normalizedRoot = resolve7(rootPath);
   if (!normalizedSandbox.startsWith(normalizedRoot + sep)) {
     return {
       success: false,
@@ -25354,7 +27128,7 @@ function checkRateLimit(ip, maxRequests) {
   return true;
 }
 function readBody(req, maxSize) {
-  return new Promise((resolve11, reject) => {
+  return new Promise((resolve12, reject) => {
     const chunks = [];
     let totalSize = 0;
     req.on("data", (chunk) => {
@@ -25367,7 +27141,7 @@ function readBody(req, maxSize) {
       chunks.push(chunk);
     });
     req.on("end", () => {
-      resolve11(Buffer.concat(chunks).toString("utf-8"));
+      resolve12(Buffer.concat(chunks).toString("utf-8"));
     });
     req.on("error", (err) => {
       reject(err);
@@ -25582,8 +27356,8 @@ function startMiniClaw(config) {
 
 // src/watch/watcher.ts
 init_scanner();
-import { watch, existsSync as existsSync6, readdirSync as readdirSync2, statSync as statSync4 } from "fs";
-import { resolve as resolve7 } from "path";
+import { watch, existsSync as existsSync7, readdirSync as readdirSync2, statSync as statSync4 } from "fs";
+import { resolve as resolve8 } from "path";
 
 // src/watch/diff.ts
 init_fingerprint();
@@ -25731,8 +27505,8 @@ function startWatcher(config) {
     scanCount = 1;
   }
   for (const watchPath of config.paths) {
-    const resolvedPath = resolve7(watchPath);
-    if (!existsSync6(resolvedPath)) continue;
+    const resolvedPath = resolve8(watchPath);
+    if (!existsSync7(resolvedPath)) continue;
     const isDir = statSync4(resolvedPath).isDirectory();
     if (!isDir) continue;
     try {
@@ -25814,7 +27588,7 @@ function collectWatchDirectories(rootPath) {
       if (!entry.isDirectory()) {
         continue;
       }
-      const childPath = resolve7(currentPath, entry.name);
+      const childPath = resolve8(currentPath, entry.name);
       directories.push(childPath);
       queue.push(childPath);
     }
@@ -25831,7 +27605,7 @@ function isRecursiveWatchUnsupported(error) {
 function performInitialScan(config) {
   try {
     const targetPath = config.paths[0];
-    if (!targetPath || !existsSync6(targetPath)) return null;
+    if (!targetPath || !existsSync7(targetPath)) return null;
     const result = scan(targetPath);
     const minIndex = SEVERITY_ORDER[config.minSeverity];
     const filteredFindings = result.findings.filter(
@@ -25848,7 +27622,7 @@ function performInitialScan(config) {
 async function handleChange(config, currentBaseline, onResult) {
   try {
     const targetPath = config.paths[0];
-    if (!targetPath || !existsSync6(targetPath)) return;
+    if (!targetPath || !existsSync7(targetPath)) return;
     const result = scan(targetPath);
     const minIndex = SEVERITY_ORDER[config.minSeverity];
     const filteredFindings = result.findings.filter(
@@ -25874,27 +27648,27 @@ async function handleChange(config, currentBaseline, onResult) {
 }
 
 // src/runtime/policy.ts
-import { readFileSync as readFileSync5, existsSync as existsSync7 } from "fs";
-import { resolve as resolve8 } from "path";
+import { readFileSync as readFileSync6, existsSync as existsSync8 } from "fs";
+import { resolve as resolve9 } from "path";
 
 // src/runtime/types.ts
-import { z as z2 } from "zod";
-var RuntimePolicySchema = z2.object({
-  version: z2.literal(1),
-  deny: z2.array(
-    z2.object({
-      tool: z2.string(),
-      pattern: z2.string().optional(),
-      reason: z2.string().optional()
+import { z as z3 } from "zod";
+var RuntimePolicySchema = z3.object({
+  version: z3.literal(1),
+  deny: z3.array(
+    z3.object({
+      tool: z3.string(),
+      pattern: z3.string().optional(),
+      reason: z3.string().optional()
     })
   ).default([]),
-  rateLimit: z2.object({
-    maxPerMinute: z2.number().int().min(1).default(60),
-    tools: z2.array(z2.string()).default([])
+  rateLimit: z3.object({
+    maxPerMinute: z3.number().int().min(1).default(60),
+    tools: z3.array(z3.string()).default([])
   }).optional(),
-  log: z2.object({
-    enabled: z2.boolean().default(true),
-    path: z2.string().default(".agentshield/runtime.ndjson")
+  log: z3.object({
+    enabled: z3.boolean().default(true),
+    path: z3.string().default(".agentshield/runtime.ndjson")
   }).optional()
 });
 
@@ -25927,32 +27701,32 @@ function generateDefaultPolicy() {
 }
 
 // src/runtime/evaluator.ts
-import { appendFileSync, existsSync as existsSync8, mkdirSync as mkdirSync4 } from "fs";
+import { appendFileSync, existsSync as existsSync9, mkdirSync as mkdirSync4 } from "fs";
 import { dirname as dirname3 } from "path";
 
 // src/runtime/install.ts
-import { readFileSync as readFileSync7, writeFileSync as writeFileSync5, existsSync as existsSync10, mkdirSync as mkdirSync5, renameSync } from "fs";
-import { join as join8, dirname as dirname4 } from "path";
+import { readFileSync as readFileSync8, writeFileSync as writeFileSync5, existsSync as existsSync11, mkdirSync as mkdirSync5, renameSync } from "fs";
+import { join as join9, dirname as dirname4 } from "path";
 
 // src/runtime/status.ts
-import { existsSync as existsSync9, readFileSync as readFileSync6 } from "fs";
-import { join as join7, resolve as resolve9 } from "path";
+import { existsSync as existsSync10, readFileSync as readFileSync7 } from "fs";
+import { join as join8, resolve as resolve10 } from "path";
 function defaultLogPath(targetPath) {
-  return resolve9(targetPath, ".agentshield", "runtime.ndjson");
+  return resolve10(targetPath, ".agentshield", "runtime.ndjson");
 }
 function runtimePolicyPath(targetPath) {
-  return join7(targetPath, ".agentshield", "runtime-policy.json");
+  return join8(targetPath, ".agentshield", "runtime-policy.json");
 }
 function getRuntimeStatus(targetPath) {
   const settingsPath = resolveSettingsPath(targetPath);
-  const settingsExists = existsSync9(settingsPath);
+  const settingsExists = existsSync10(settingsPath);
   const policyPath = runtimePolicyPath(targetPath);
-  const policyExists = existsSync9(policyPath);
+  const policyExists = existsSync10(policyPath);
   let settingsValid = false;
   let hookCount = 0;
   if (settingsExists) {
     try {
-      const parsed = JSON.parse(readFileSync6(settingsPath, "utf-8"));
+      const parsed = JSON.parse(readFileSync7(settingsPath, "utf-8"));
       if (parsed === null || Array.isArray(parsed) || typeof parsed !== "object") {
         throw new Error("settings.json must contain an object");
       }
@@ -25972,18 +27746,18 @@ function getRuntimeStatus(targetPath) {
   let logPath = defaultLogPath(targetPath);
   if (policyExists) {
     try {
-      const parsed = JSON.parse(readFileSync6(policyPath, "utf-8"));
+      const parsed = JSON.parse(readFileSync7(policyPath, "utf-8"));
       const result = RuntimePolicySchema.safeParse(parsed);
       if (result.success) {
         policyValid = true;
         const configuredLogPath = result.data.log?.path ?? ".agentshield/runtime.ndjson";
-        logPath = resolve9(targetPath, configuredLogPath);
+        logPath = resolve10(targetPath, configuredLogPath);
       }
     } catch {
       policyValid = false;
     }
   }
-  const logExists = existsSync9(logPath);
+  const logExists = existsSync10(logPath);
   const hookInstalled = hookCount > 0;
   let health;
   let checkExitCode;
@@ -26041,11 +27815,11 @@ function parseJsonObject(raw) {
   return parsed;
 }
 function readSettingsFile(settingsPath) {
-  if (!existsSync10(settingsPath)) {
+  if (!existsSync11(settingsPath)) {
     return { exists: false, valid: true, value: {} };
   }
   try {
-    const parsed = parseJsonObject(readFileSync7(settingsPath, "utf-8"));
+    const parsed = parseJsonObject(readFileSync8(settingsPath, "utf-8"));
     if (!parsed) {
       return { exists: true, valid: false, value: {} };
     }
@@ -26055,14 +27829,14 @@ function readSettingsFile(settingsPath) {
   }
 }
 function runtimePolicyPath2(targetPath) {
-  return join8(targetPath, ".agentshield", "runtime-policy.json");
+  return join9(targetPath, ".agentshield", "runtime-policy.json");
 }
 function hasValidRuntimePolicy(policyPath) {
-  if (!existsSync10(policyPath)) {
+  if (!existsSync11(policyPath)) {
     return false;
   }
   try {
-    const parsed = JSON.parse(readFileSync7(policyPath, "utf-8"));
+    const parsed = JSON.parse(readFileSync8(policyPath, "utf-8"));
     return RuntimePolicySchema.safeParse(parsed).success;
   } catch {
     return false;
@@ -26073,11 +27847,11 @@ function repairHint() {
 }
 function nextBackupPath(filePath) {
   const basePath = `${filePath}.agentshield.bak`;
-  if (!existsSync10(basePath)) {
+  if (!existsSync11(basePath)) {
     return basePath;
   }
   let index = 1;
-  while (existsSync10(`${basePath}.${index}`)) {
+  while (existsSync11(`${basePath}.${index}`)) {
     index += 1;
   }
   return `${basePath}.${index}`;
@@ -26090,11 +27864,11 @@ function backupFile(filePath) {
 function installRuntimeAtPath(targetPath, settingsPath) {
   const policyPath = runtimePolicyPath2(targetPath);
   const policyDir = dirname4(policyPath);
-  if (!existsSync10(policyDir)) {
+  if (!existsSync11(policyDir)) {
     mkdirSync5(policyDir, { recursive: true });
   }
   let policyCreated = false;
-  if (!existsSync10(policyPath)) {
+  if (!existsSync11(policyPath)) {
     writeFileSync5(policyPath, generateDefaultPolicy());
     policyCreated = true;
   }
@@ -26127,7 +27901,7 @@ function installRuntimeAtPath(targetPath, settingsPath) {
   const updatedHooks = { ...hooks, PreToolUse: updatedPreToolUse };
   const updatedSettings = { ...settings, hooks: updatedHooks };
   const dir = dirname4(settingsPath);
-  if (!existsSync10(dir)) {
+  if (!existsSync11(dir)) {
     mkdirSync5(dir, { recursive: true });
   }
   writeFileSync5(settingsPath, JSON.stringify(updatedSettings, null, 2));
@@ -26152,7 +27926,7 @@ function installRuntime(targetPath) {
       message: `settings.json exists but could not be parsed. ${repairHint()}`
     };
   }
-  if (existsSync10(policyPath) && !hasValidRuntimePolicy(policyPath)) {
+  if (existsSync11(policyPath) && !hasValidRuntimePolicy(policyPath)) {
     return {
       hookInstalled: false,
       policyCreated: false,
@@ -26171,14 +27945,14 @@ function repairRuntime(targetPath) {
   const settingsState = readSettingsFile(settingsPath);
   if (settingsState.exists && !settingsState.valid) {
     const dir = dirname4(settingsPath);
-    if (!existsSync10(dir)) {
+    if (!existsSync11(dir)) {
       mkdirSync5(dir, { recursive: true });
     }
     settingsBackupPath = backupFile(settingsPath);
   }
-  if (existsSync10(policyPath) && !hasValidRuntimePolicy(policyPath)) {
+  if (existsSync11(policyPath) && !hasValidRuntimePolicy(policyPath)) {
     const policyDir = dirname4(policyPath);
-    if (!existsSync10(policyDir)) {
+    if (!existsSync11(policyDir)) {
       mkdirSync5(policyDir, { recursive: true });
     }
     policyBackupPath = backupFile(policyPath);
@@ -26203,7 +27977,7 @@ function repairRuntime(targetPath) {
 }
 function uninstallRuntime(targetPath) {
   const settingsPath = resolveSettingsPath(targetPath);
-  if (!existsSync10(settingsPath)) {
+  if (!existsSync11(settingsPath)) {
     return { removed: false, message: "No settings.json found." };
   }
   const settingsState = readSettingsFile(settingsPath);
@@ -26228,10 +28002,10 @@ function uninstallRuntime(targetPath) {
   return { removed: true, message: "AgentShield runtime hook removed." };
 }
 function resolveSettingsPath(targetPath) {
-  const claudeSettings = join8(targetPath, ".claude", "settings.json");
-  if (existsSync10(claudeSettings)) return claudeSettings;
-  const directSettings = join8(targetPath, "settings.json");
-  if (existsSync10(directSettings)) return directSettings;
+  const claudeSettings = join9(targetPath, ".claude", "settings.json");
+  if (existsSync11(claudeSettings)) return claudeSettings;
+  const directSettings = join9(targetPath, "settings.json");
+  if (existsSync11(directSettings)) return directSettings;
   return claudeSettings;
 }
 
@@ -26369,13 +28143,13 @@ function createScanLogger(logPath, logFormat) {
 }
 var program = new Command();
 var SEVERITY_ORDER4 = ["critical", "high", "medium", "low", "info"];
-program.name("agentshield").description("Security auditor for AI agent configurations").version("1.6.0");
+program.name("datashield").description("Data-leak auditor for AI agent configurations: secrets, personal data, credentials, keys, and one-time codes").version("1.6.0");
 function emitReportOutput(output, outputPath) {
   if (!outputPath) {
     console.log(output);
     return;
   }
-  const resolvedOutput = resolve10(outputPath);
+  const resolvedOutput = resolve11(outputPath);
   mkdirSync9(dirname7(resolvedOutput), { recursive: true });
   writeFileSync9(resolvedOutput, output);
   console.log(`Report written to: ${resolvedOutput}`);
@@ -26417,7 +28191,7 @@ program.command("scan").description("Scan a Claude Code configuration directory 
   []
 ).option("--policy <path>", "Validate against an organization policy file").option("--evidence-pack <dir>", "Write a portable evidence bundle for audits and security reviews").option("--remediation-plan <path>", "Write a stable-fingerprint JSON remediation plan").option("--no-evidence-redact", "Disable evidence-pack redaction of local paths, usernames, emails, and token-shaped strings").option("--min-severity <severity>", "Minimum severity to report: critical, high, medium, low, info", "info").option("-v, --verbose", "Show detailed output", false).action(async (options) => {
   const targetPath = resolveTargetPath(options.path);
-  if (!existsSync14(targetPath)) {
+  if (!existsSync15(targetPath)) {
     console.error(`Error: Path does not exist: ${targetPath}`);
     process.exit(1);
   }
@@ -26454,7 +28228,16 @@ program.command("scan").description("Scan a Claude Code configuration directory 
     }
   }
   logger.log({ level: "info", phase: "static", message: "Running static analysis" });
-  const result = scan(targetPath, { extraRules });
+  let result;
+  try {
+    result = scan(targetPath, { extraRules });
+  } catch (error) {
+    if (error instanceof ScanConfigError) {
+      console.error(`Error: ${error.message}`);
+      process.exit(1);
+    }
+    throw error;
+  }
   const filteredResult = {
     ...result,
     findings: filterFindingsByMinSeverity(result.findings, options.minSeverity)
@@ -26483,7 +28266,7 @@ program.command("scan").description("Scan a Claude Code configuration directory 
     logger.log({ level: "info", phase: "policy", message: "Validating against organization policy" });
     try {
       const { loadPolicy: loadOrgPolicy, evaluatePolicy: evaluatePolicy2, renderPolicyEvaluation: renderPolicyEvaluation2 } = await Promise.resolve().then(() => (init_policy(), policy_exports));
-      const policyResult = loadOrgPolicy(resolve10(options.policy));
+      const policyResult = loadOrgPolicy(resolve11(options.policy));
       if (!policyResult.success) {
         console.error(`
   Error: ${policyResult.error}
@@ -26953,7 +28736,7 @@ baseline.command("write").description("Scan a target and write the current findi
     process.exit(1);
   }
   const targetPath = resolveTargetPath(options.path);
-  if (!existsSync14(targetPath)) {
+  if (!existsSync15(targetPath)) {
     console.error(`Error: Path does not exist: ${targetPath}`);
     process.exit(1);
   }
@@ -26964,7 +28747,7 @@ baseline.command("write").description("Scan a target and write the current findi
     findings: filterFindingsByMinSeverity(result.findings, options.minSeverity)
   };
   const report = calculateScore(filteredResult);
-  const outputPath = resolve10(options.output);
+  const outputPath = resolve11(options.output);
   saveBaseline2(filteredResult.findings, report.score, outputPath);
   const metadata = {
     baselinePath: outputPath,
@@ -26988,7 +28771,7 @@ baseline.command("write").description("Scan a target and write the current findi
 });
 program.command("watch").description("Continuously monitor config directories for security regressions").option("-p, --path <path>", "Path to watch (default: ~/.claude or current dir)").option("--debounce <ms>", "Debounce interval in milliseconds", "500").option("--alert <mode>", "Alert mode: terminal, webhook, both", "terminal").option("--webhook <url>", "Webhook URL for alerts").option("--min-severity <severity>", "Minimum severity to track: critical, high, medium, low, info", "info").option("--block", "Exit non-zero if critical findings detected (for CI integration)", false).action((options) => {
   const targetPath = resolveTargetPath(options.path);
-  if (!existsSync14(targetPath)) {
+  if (!existsSync15(targetPath)) {
     console.error(`Error: Path does not exist: ${targetPath}`);
     process.exit(1);
   }
@@ -27023,12 +28806,12 @@ program.command("watch").description("Continuously monitor config directories fo
   }
   console.log(`
   Performing initial scan to establish baseline...`);
-  const homeClaude = resolve10(
+  const homeClaude = resolve11(
     process.env.HOME ?? process.env.USERPROFILE ?? ".",
     ".claude"
   );
   const watchPaths = [targetPath];
-  if (existsSync14(homeClaude) && homeClaude !== targetPath) {
+  if (existsSync15(homeClaude) && homeClaude !== targetPath) {
     watchPaths.push(homeClaude);
     console.log(`  Also watching:  ${homeClaude}`);
   }
@@ -27068,7 +28851,7 @@ program.command("watch").description("Continuously monitor config directories fo
 });
 var runtime = program.command("runtime").description("Runtime monitoring \u2014 PreToolUse hook for policy enforcement");
 runtime.command("install").description("Install the AgentShield PreToolUse hook into settings.json").option("-p, --path <path>", "Target directory (default: current directory)", ".").action((options) => {
-  const result = installRuntime(resolve10(options.path));
+  const result = installRuntime(resolve11(options.path));
   console.log(`
   AgentShield Runtime Monitor
 `);
@@ -27084,7 +28867,7 @@ runtime.command("install").description("Install the AgentShield PreToolUse hook 
   console.log();
 });
 runtime.command("uninstall").description("Remove the AgentShield PreToolUse hook from settings.json").option("-p, --path <path>", "Target directory (default: current directory)", ".").action((options) => {
-  const result = uninstallRuntime(resolve10(options.path));
+  const result = uninstallRuntime(resolve11(options.path));
   console.log(`
   AgentShield Runtime Monitor
 `);
@@ -27092,7 +28875,7 @@ runtime.command("uninstall").description("Remove the AgentShield PreToolUse hook
 `);
 });
 runtime.command("status").description("Inspect runtime hook, policy, and logging readiness").option("-p, --path <path>", "Target directory (default: current directory)", ".").option("--json", "Output status as JSON", false).option("--check", "Exit non-zero when runtime monitor is not ready", false).action((options) => {
-  const result = getRuntimeStatus(resolve10(options.path));
+  const result = getRuntimeStatus(resolve11(options.path));
   if (options.json) {
     console.log(JSON.stringify(result, null, 2));
   } else {
@@ -27118,8 +28901,8 @@ runtime.command("status").description("Inspect runtime hook, policy, and logging
   }
 });
 runtime.command("repair").description("Back up invalid runtime files and restore a healthy monitor install").option("-p, --path <path>", "Target directory (default: current directory)", ".").action((options) => {
-  const result = repairRuntime(resolve10(options.path));
-  const status = getRuntimeStatus(resolve10(options.path));
+  const result = repairRuntime(resolve11(options.path));
+  const status = getRuntimeStatus(resolve11(options.path));
   console.log(`
   AgentShield Runtime Monitor
 `);
@@ -27141,9 +28924,9 @@ runtime.command("repair").description("Back up invalid runtime files and restore
 var policyCmd = program.command("policy").description("Organization-wide security policy management");
 policyCmd.command("init").description("Generate an example organization policy file").option("-o, --output <path>", "Output path", ".agentshield/policy.json").option("--pack <pack>", "Policy pack preset: oss, team, enterprise, regulated, high-risk-hooks-mcp, ci-enforcement", "enterprise").option("--owner <owner>", "Policy owner identifier; repeat for multiple owners", collectOption, []).option("--name <name>", "Policy display name").action(async (options) => {
   const { generateExamplePolicy: generateExamplePolicy2, listPolicyPacks: listPolicyPacks2, PolicyPackSchema: PolicyPackSchema2 } = await Promise.resolve().then(() => (init_policy(), policy_exports));
-  const outputPath = resolve10(options.output);
+  const outputPath = resolve11(options.output);
   const packResult = PolicyPackSchema2.safeParse(options.pack);
-  if (existsSync14(outputPath)) {
+  if (existsSync15(outputPath)) {
     console.error(`
   Error: Policy file already exists at ${outputPath}
 `);
@@ -27156,8 +28939,8 @@ policyCmd.command("init").description("Generate an example organization policy f
 `);
     process.exit(1);
   }
-  const dir = resolve10(outputPath, "..");
-  if (!existsSync14(dir)) {
+  const dir = resolve11(outputPath, "..");
+  if (!existsSync15(dir)) {
     mkdirSync9(dir, { recursive: true });
   }
   writeFileSync9(outputPath, generateExamplePolicy2(packResult.data, {
@@ -27189,7 +28972,7 @@ policyCmd.command("export").description("Export policy pack JSON files with a ch
     }
     return result.data;
   }) : void 0;
-  const outputDir = resolve10(options.outputDir);
+  const outputDir = resolve11(options.outputDir);
   const manifest = exportPolicyPacks2({
     outputDir,
     packs,
@@ -27202,13 +28985,13 @@ policyCmd.command("export").description("Export policy pack JSON files with a ch
   }
   console.log(`
   Policy bundle written to: ${outputDir}`);
-  console.log(`  Manifest:       ${join12(outputDir, "manifest.json")}`);
+  console.log(`  Manifest:       ${join13(outputDir, "manifest.json")}`);
   console.log(`  Policies:       ${manifest.packs.length}`);
   for (const pack of manifest.packs) {
     console.log(`  - ${pack.id}: ${pack.file} (${pack.sha256})`);
   }
   if (manifest.packs[0]) {
-    console.log(`  Then run: agentshield scan --policy ${join12(options.outputDir, manifest.packs[0].file)}
+    console.log(`  Then run: agentshield scan --policy ${join13(options.outputDir, manifest.packs[0].file)}
 `);
   } else {
     console.log("");
@@ -27228,8 +29011,8 @@ policyCmd.command("promote").description("Promote a checksum-verified exported p
   }
   try {
     const result = promotePolicyPack2({
-      manifestPath: resolve10(options.manifest),
-      outputPath: resolve10(options.output),
+      manifestPath: resolve11(options.manifest),
+      outputPath: resolve11(options.output),
       pack: pack?.data,
       dryRun: options.dryRun
     });
@@ -27350,17 +29133,17 @@ miniclaw.command("start").description("Start the MiniClaw server").option("-p, -
 program.parse();
 function resolveTargetPath(pathArg) {
   if (pathArg) {
-    return resolve10(pathArg);
+    return resolve11(pathArg);
   }
-  const localClaude = resolve10(process.cwd(), ".claude");
-  if (existsSync14(localClaude)) {
+  const localClaude = resolve11(process.cwd(), ".claude");
+  if (existsSync15(localClaude)) {
     return localClaude;
   }
-  const homeClaude = resolve10(
+  const homeClaude = resolve11(
     process.env.HOME ?? process.env.USERPROFILE ?? ".",
     ".claude"
   );
-  if (existsSync14(homeClaude)) {
+  if (existsSync15(homeClaude)) {
     return homeClaude;
   }
   return process.cwd();

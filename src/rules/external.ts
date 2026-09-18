@@ -1,6 +1,15 @@
 import { existsSync, readFileSync } from "node:fs";
 import { z } from "zod";
 import type { ConfigFile, Finding, FindingCategory, Rule, Severity } from "../types.js";
+import { maskSensitive } from "../detection/index.js";
+
+/** Categories whose matched text must never be emitted verbatim. */
+const SENSITIVE_CATEGORIES: ReadonlySet<string> = new Set([
+  "secrets",
+  "pii",
+  "credentials",
+  "codes",
+]);
 
 /**
  * External rule-pack loader (`--rule-pack`).
@@ -33,6 +42,9 @@ const CategorySchema = z.enum([
   "exposure",
   "exfiltration",
   "misconfiguration",
+  "pii",
+  "credentials",
+  "codes",
 ]);
 
 const RulePackEntrySchema = z.object({
@@ -106,7 +118,9 @@ function entryToRule(entry: RulePackEntry, compiled: ReadonlyArray<RegExp>): Rul
             description: `${entry.description ?? entry.name} (external rule ${entry.id}).`,
             file: file.path,
             line: findLineNumber(file.content, match.index ?? 0),
-            evidence: match[0].substring(0, 100),
+            evidence: SENSITIVE_CATEGORIES.has(entry.category)
+              ? maskSensitive(match[0])
+              : match[0].substring(0, 100),
           });
           seq += 1;
           if (findings.length >= MAX_FINDINGS_PER_RULE_PER_FILE) return findings;

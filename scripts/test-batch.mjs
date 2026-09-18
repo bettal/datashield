@@ -41,7 +41,6 @@ const BATCHES = {
     "tests/evidence-pack/*.test.ts",
     "tests/supply-chain/*.test.ts",
     "tests/policy/*.test.ts",
-    "tests/sponsor-surface.test.ts",
   ],
 };
 

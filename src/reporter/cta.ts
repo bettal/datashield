@@ -13,8 +13,8 @@
  * logs and scripted use can silence it regardless of other settings.
  */
 
-const OPT_IN_ENV_VARS = ["ECC_CTA", "AGENTSHIELD_CTA"] as const;
-const OPT_OUT_ENV_VARS = ["ECC_NO_CTA", "AGENTSHIELD_NO_CTA"] as const;
+const OPT_IN_ENV_VARS = ["DATASHIELD_CTA", "ECC_CTA", "AGENTSHIELD_CTA"] as const;
+const OPT_OUT_ENV_VARS = ["DATASHIELD_NO_CTA", "ECC_NO_CTA", "AGENTSHIELD_NO_CTA"] as const;
 
 const PRO_URL = "https://github.com/apps/ecc-tools";
 

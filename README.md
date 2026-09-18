@@ -1,28 +1,18 @@
 <div align="center">
 
-<img src="./assets/agentshield-logo.png" alt="AgentShield" width="180" />
+# DataShield
 
-# AgentShield
+**Data-leak auditor for AI agent configurations**
 
-**Security auditor for AI agent configurations**
+Scans AI agent setups (OpenCode, Claude Code, Codex, Gemini, MCP servers, hooks, skills, agents)<br/>
+for **secrets, personal data, credentials, keys, and one-time codes** — plus the inherited<br/>
+agent-configuration security checks (permissions, hook injection, MCP risk, prompt injection).
 
-Scans Claude Code setups for hardcoded secrets, permission misconfigs,<br/>
-hook injection, MCP server risks, and agent prompt injection vectors.<br/>
-Available as CLI, GitHub Action, and [GitHub App](https://github.com/apps/ecc-tools) integration.
-
-[![npm version](https://img.shields.io/npm/v/ecc-agentshield)](https://www.npmjs.com/package/ecc-agentshield)
-[![npm downloads](https://img.shields.io/npm/dm/ecc-agentshield)](https://www.npmjs.com/package/ecc-agentshield)
 [![tests](https://img.shields.io/badge/tests-passing-brightgreen)]()
 [![coverage](https://img.shields.io/badge/coverage-v8-blue)]()
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-[Quick Start](#quick-start) · [What It Catches](#what-it-catches) · [API Reference](#api-reference) · [Opus Pipeline](#opus-46-deep-analysis---opus) · [GitHub Action](#github-action) · [Distribution](#distribution) · [MiniClaw](#miniclaw) · [Changelog](./CHANGELOG.md)
-
-<a href="https://compute.itomarkets.com">
-  <img src="./assets/ito.svg" alt="Itô Markets" width="180" />
-</a>
-<br />
-<sub><strong>Preferred compute sponsor:</strong> Run or self-host any open-source model. Itô is ECC's suggested compute provider. Any GPU provider works. ECC only links to the Itô dashboard for sign-in and GPU rental or management; it does not create or manage rentals or provision compute or serving. Managed inference through Itô is not live yet.</sub>
+[Quick Start](#quick-start) · [What It Finds](#what-it-finds) · [Config-Driven Discovery](#config-driven-discovery) · [Development](#development) · [Roadmap](#roadmap) · [Attribution](#attribution)
 
 </div>
 
@@ -30,1028 +20,140 @@ Available as CLI, GitHub Action, and [GitHub App](https://github.com/apps/ecc-to
 
 ## Why
 
-The AI agent ecosystem is growing faster than its security tooling. In January 2026 alone:
+Agent configurations, skills, prompts, notes, and `.env` files routinely end up holding
+API keys, tokens, personal data, logins, and recovery codes. These files are copied between
+machines, committed to repos, pasted into prompts, and installed from community marketplaces.
+DataShield reads a configuration first, then walks the surfaces it describes — recursively —
+and flags data leaks before they become incidents.
 
-- **12%** of a major agent skill marketplace was malicious (341 of 2,857 community skills)
-- A **CVSS 8.8** CVE exposed 17,500+ internet-facing instances to one-click RCE
-- The Moltbook breach compromised **1.5M API tokens** across 770,000 agents
+DataShield is a hard fork of [AgentShield](https://github.com/affaan-m/agentshield) (MIT).
+It keeps AgentShield's rule engine and agent-security checks, and extends detection toward
+data-leak classes that upstream does not cover.
 
-Developers install community skills, connect MCP servers, and configure hooks without any automated way to audit the security of their setup. AgentShield scans your `.claude/` directory and flags vulnerabilities before they become exploits.
+## What It Finds
 
-Built at the [Claude Code Hackathon](https://cerebralvalley.ai/e/claude-code-hackathon) (Cerebral Valley x Anthropic, Feb 2026). Part of the [Everything Claude Code](https://github.com/affaan-m/everything-claude-code) ecosystem (42K+ stars).
+| Class | Examples |
+|---|---|
+| Secret data | API keys (Anthropic, OpenAI, xAI, AWS, Google, Stripe, …), tokens, bearer tokens, DB connection strings, private key material, webhooks |
+| Personal data | RF: СНИЛС, ИНН, ОГРН/ОГРНИП, паспорт РФ, водительское, БИК/р/с, +7 phones. Intl: email, phone (E.164), SSN, IBAN, credit cards (Luhn) |
+| Credentials | login/password pairs, `Authorization: Basic`, `.env` credentials, credential-file references (`.aws/credentials`, `.netrc`, `.kube/config`, …) |
+| Keys | PEM/PGP private keys, cloud service-account keys, signing keys |
+| One-time codes | OTP/TOTP/2FA, verification codes, recovery/backup codes, PINs |
+| Inherited | permission misconfigs, hook injection, MCP server risk, agent prompt-injection surface |
+
+> All detection classes above are implemented. Precision comes from checksum
+> validators (Luhn, IBAN mod-97, СНИЛС/ИНН/ОГРН control digits), a vendor-prefix
+> catalogue, Shannon-entropy scoring, and context/code-fence suppression.
+> The inherited agent-security engine is fully present and tested.
 
 ## Quick Start
 
-```bash
-# Scan your Claude Code config (no install required)
-npx ecc-agentshield scan
-
-# Or install globally
-npm install -g ecc-agentshield
-agentshield scan
-```
-
-That's it. AgentShield auto-discovers your `~/.claude/` directory, scans all config files, and prints a graded security report.
-
-Discovery intentionally skips common generated directories such as `node_modules`, build output, and `.dmux` worktree mirrors so transient copies do not duplicate findings.
-
-```
-  AgentShield Security Report
-
-  Grade: F (0/100)
-
-  Score Breakdown
-  Secrets        ░░░░░░░░░░░░░░░░░░░░ 0
-  Permissions    ░░░░░░░░░░░░░░░░░░░░ 0
-  Hooks          ░░░░░░░░░░░░░░░░░░░░ 0
-  MCP Servers    ░░░░░░░░░░░░░░░░░░░░ 0
-  Agents         ░░░░░░░░░░░░░░░░░░░░ 0
-
-  ● CRITICAL  Hardcoded Anthropic API key
-    CLAUDE.md:13
-    Evidence: sk-ant-a...cdef
-    Fix: Replace with environment variable reference [auto-fixable]
-
-  ● CRITICAL  Overly permissive allow rule: Bash(*)
-    settings.json
-    Evidence: Bash(*)
-    Fix: Restrict to specific commands: Bash(git *), Bash(npm *), Bash(node *)
-
-  Summary
-  Files scanned: 6
-  Findings: 73 total — 19 critical, 29 high, 15 medium, 4 low, 6 info
-  Auto-fixable: 8 (use --fix)
-```
-
-### More commands
+DataShield is not published to npm yet; run it from source:
 
 ```bash
-# Scan a specific directory
-agentshield scan --path /path/to/.claude
+git clone https://github.com/bettal/datashield.git
+cd datashield
+npm install
+npm run build
 
-# Auto-fix safe issues (replaces hardcoded secrets with env var references)
-agentshield scan --fix
+# Scan a config directory
+node dist/index.js scan --path ~/.config/opencode
 
-# JSON output for CI pipelines
-agentshield scan --format json
-
-# Generate an HTML executive security report
-agentshield scan --format html > report.html
-
-# Generate a portable audit bundle
-agentshield scan --evidence-pack ./agentshield-evidence
-
-# Three-agent Claude Opus adversarial analysis (requires ANTHROPIC_API_KEY)
-agentshield scan --opus --stream
-
-# Generate a secure baseline config
-agentshield init
+# JSON report for CI
+node dist/index.js scan --path . --format json
 ```
 
-JSON reports now expose `findings[].runtimeConfidence` when AgentShield can distinguish active runtime config from project-local settings, template/example inventories, installed Claude plugin caches, declarative plugin manifests, and manifest-resolved non-shell hook implementations. Reports also include local harness adapter evidence for Claude Code, OpenCode, Codex, Gemini, Zed, VS Code, dmux, terminal-agent wrappers, and project-local templates when matching markers are present.
-
-## What It Catches
-
-**268 rules** across 15 modules, graded A to F with a 0 to 100 numeric score. Recognized defenses are listed and never penalized.
-
-#### Scoring and recognized defenses
-
-The score starts at 100 per category and only findings deduct from it: critical 25, high 15, medium 5, low 2, info 0. Protective configuration the scanner finds (deny and ask lists, sandbox settings, blocking PreToolUse hooks, read-only agent tool lists, Codex `sandbox_mode`, Hermes manual approvals, and similar) is listed in every report under "Recognized Defenses" so it gets credit and is visibly never penalized. Defenses do not add points either: the score cannot be gamed by adding decorative deny rules, it can only be lowered by real findings. Guard-pattern findings the permission rules emit at info severity ("Deny/ask rule blocking ...", "Prohibition of ...", "Mention of ...") are enforced to a zero deduction in `src/reporter/score.ts`.
-
-### Secrets Detection
-
-| What | Examples |
-|------|----------|
-| API keys | Anthropic (`sk-ant-`), OpenAI (`sk-proj-`/`sk-`), xAI (`xai-`), AWS (`AKIA`), Google/Gemini (`AIza`), Stripe (`sk_test_`/`sk_live_`) |
-| Tokens | GitHub PATs (`ghp_`/`github_pat_`), Linear (`lin_api_`), Cloudflare (`CF_API_TOKEN=`), Slack (`xox[bprs]-`), JWTs (`eyJ...`), Bearer tokens |
-| Credentials | Hardcoded passwords, database connection strings (postgres/mongo/mysql/redis), private key material |
-| Env leaks | Secrets passed through environment variables in configs, `echo $SECRET` in hooks |
-
-### Permission Audit (17 rules)
-
-| What | Examples |
-|------|----------|
-| Wildcard access | `Bash(*)`, `Write(*)`, `Edit(*)` — unrestricted tool permissions |
-| Missing deny lists | No deny rules for `rm -rf`, `sudo`, `chmod 777` |
-| Dangerous flags | `--dangerously-skip-permissions` usage |
-| Mutable tool exposure | All mutable tools (Write, Edit, Bash) allowed without scoping |
-| Destructive git | `git push --force`, `git reset --hard` in allowed commands |
-| Unrestricted network | `curl *`, `wget`, `ssh *`, `scp *` in allow list without scope |
-
-### Hook Analysis (40 rules)
-
-| What | Examples |
-|------|----------|
-| Command injection | `${file}` interpolation in shell commands — attacker-controlled filenames become code |
-| Data exfiltration | `curl -X POST` with variable interpolation sending data to external URLs |
-| Silent errors | `2>/dev/null`, `\|\| true` — failing security hooks that silently pass |
-| Missing hooks | No PreToolUse hooks, no Stop hooks for session-end validation |
-| Network exposure | Unthrottled network requests in hooks, sensitive file access without filtering |
-| Session startup | SessionStart hooks that download and execute remote scripts |
-| Package installs | Global `npm install -g`, `pip install`, `gem install`, `cargo install` in hooks |
-| Container escape | Docker `--privileged`, `--pid=host`, `--network=host`, root volume mounts |
-| Credential access | macOS Keychain, GNOME Keyring, /etc/shadow reads |
-| Reverse shells | `/dev/tcp`, `mkfifo + nc`, Python/Perl socket shells |
-| Clipboard access | `pbcopy`, `xclip`, `xsel`, `wl-copy` — exfiltration via clipboard |
-| Log tampering | `journalctl --vacuum`, `rm /var/log`, `history -c` — anti-forensics |
-
-### MCP Server Security (49 rules)
-
-| What | Examples |
-|------|----------|
-| High-risk servers | Shell/command MCPs, filesystem with root access, database MCPs, browser automation |
-| Supply chain | `npx -y` auto-install without confirmation — typosquatting vector |
-| Hardcoded secrets | API tokens in MCP environment config instead of env var references |
-| Remote transport | MCP servers connecting to remote URLs (SSE/streamable HTTP) |
-| Shell metacharacters | `&&`, `\|`, `;` in MCP server command arguments |
-| Missing metadata | No version pin, no description, excessive server count |
-| Sensitive file args | `.env`, `.pem`, `credentials.json` passed as server arguments |
-| Network exposure | Binding to `0.0.0.0` instead of localhost |
-| Auto-approve | `autoApprove` settings that skip user confirmation for tool calls |
-| Missing timeouts | High-risk servers without timeout — resource exhaustion risk |
-
-Supply-chain verification (`agentshield scan --supply-chain`) extracts MCP
-package references plus root `package.json` and `package-lock.json` dependency
-evidence, then reports provenance counts for npm vs git, pinned vs unpinned,
-known-good packages, and npm-registry-backed metadata. Add
-`--supply-chain-online` to query npm for downloads, maintainers, postinstall
-scripts, deprecation, and package age.
-
-Package-manager hardening checks also scan `.npmrc`, `.yarnrc.yml`, and
-`pnpm-workspace.yaml` for plaintext registry credentials, explicit dependency
-lifecycle-script enablement, and missing or weak release-age cooldowns where the
-package manager supports them. npm configs are checked for lifecycle-script
-blocking and unsupported release-age keys that can create false confidence; use
-pnpm `minimumReleaseAge` / `minimum-release-age`, Yarn `npmMinimalAgeGate`, or an
-external package-manager policy wrapper for cooldown enforcement.
-
-AgentShield also scans AI developer-tool persistence surfaces used by recent npm
-and PyPI campaign payloads, including Claude Code hook settings,
-`.claude/router_runtime.js`, VS Code `tasks.json` folder-open automation,
-Zed project `tasks.json`, `.vscode/setup.mjs`, `.zed/setup.mjs`, GitHub
-workflow drop-ins, LaunchAgent/systemd dead-man switch artifacts,
-`gh-token-monitor` token-store files, metadata-service credential targets, and
-reported exfiltration or second-stage network indicators. These indicators are
-emitted as critical hook findings so CI can fail fast even after the malicious
-package has been uninstalled.
-
-#### MCP Confidence Notes
-
-AgentShield scans both active MCP config and repository-shipped MCP templates.
-
-- Findings from `.mcp.json`, `mcp.json`, `.claude/mcp.json`, `.claude.json`, and active `settings.json` are highest-confidence runtime exposure only under active Claude configuration roots; copies in docs, examples, or template directories are classified separately.
-- Findings from `settings.local.json` are emitted as `runtimeConfidence: project-local-optional`.
-- Findings from locations such as `mcp-configs/`, `config/mcp/`, or `configs/mcp/` indicate risky MCP definitions present in repository templates, not guaranteed active runtime enablement.
-- JSON, markdown, terminal, and HTML outputs now expose source context via `runtimeConfidence: active-runtime | project-local-optional | template-example | docs-example | plugin-cache | plugin-manifest | hook-code`.
-- Non-secret `template-example` MCP findings are score-weighted at `0.25x`, and one template file is capped at `10` deduction points per score category so a single MCP catalog cannot score like dozens of enabled servers.
-- In template files, findings such as risky server type, remote URL transport, `npx -y`, unpinned packages, and environment inheritance are still valuable, but they should be interpreted as "this repo ships a risky MCP template" rather than "this MCP is definitely enabled right now."
-- Aggregate findings like large MCP server counts are especially likely to overstate runtime exposure when the source file is a template catalog.
-
-### Agent Config Review (41 rules)
-
-| What | Examples |
-|------|----------|
-| Unrestricted tools | Agents with Bash access, no `allowedTools` restriction |
-| Prompt injection surface | Agents processing external/user-provided content without defenses |
-| Auto-run instructions | `CLAUDE.md` containing "Always run", "without asking", "automatically install" |
-| Hidden instructions | Unicode zero-width characters, HTML comments, base64-encoded directives |
-| URL execution | `CLAUDE.md` instructing agents to fetch and execute remote URLs |
-| Time bombs | Delayed execution instructions triggered by time or absence conditions |
-| Data harvesting | Bulk collection of passwords, credentials, or database dumps |
-| Prompt reflection | `ignore previous instructions`, `you are now`, DAN jailbreak, fake system prompts |
-| Output manipulation | `always report ok`, `remove warnings from output`, suppress security findings |
-
-Structured JSON under `.claude/subagents/` and `.claude/slash-commands/` is analyzed like agent config when it declares `allowedTools` or similar tool metadata. Slash commands under `commands/` and `slash-commands/` are typed `command-md`: they get the injection and dangerous-instruction rules but not the skill packaging hygiene rules, which only apply to `SKILL.md`. Freeform `skill-md` prompt text still has narrower security coverage than `agent-md` and `CLAUDE.md`.
-
-#### Scanner Accuracy Notes
-
-- Live audit notes and follow-up items are tracked in [`false-positive-audit.md`](./false-positive-audit.md).
-- The most useful operator guidance is in the audit's [`Triage Rules For Current Reports`](./false-positive-audit.md#triage-rules-for-current-reports) section.
-- The audit doc also includes a reusable [`False-Positive Taxonomy`](./false-positive-audit.md#false-positive-taxonomy), [`Repo Audit Worksheet`](./false-positive-audit.md#repo-audit-worksheet), and [`Release Gate For Accuracy Changes`](./false-positive-audit.md#release-gate-for-accuracy-changes).
-- Cross-file hook-manifest awareness now suppresses settings-only `hooks-no-pretooluse` when a companion `hooks/hooks.json` manifest defines PreToolUse hooks.
-- Manifest-referenced hook implementations are now discovered from `hooks/hooks.json`-style indirection; shell targets continue through hook rules, and non-shell `hook-code` targets now emit targeted findings for explicit `output(...)` context injection, transcript input access, and remote shell payloads executed via child-process wrappers.
-- Current known high-signal caveats are broader non-shell hook execution that still needs language-aware analysis beyond those current `hook-code` signals, and `skill-md` prompt text that still bypasses most agent/injection rules.
-- `runtimeConfidence` now appears on MCP findings, `settings.local.json`, docs/examples, installed Claude plugin caches, plugin manifests, and manifest-resolved non-shell hook code. Scoring discounts non-secret `template-example` and `docs-example` findings at `0.25x`, non-secret `project-local-optional` findings at `0.75x`, and non-secret `plugin-cache` / `plugin-manifest` findings at `0.5x`. Non-secret `template-example` findings are also capped at `10` deduction points per file and score category so one catalog file cannot dominate the grade. `hook-code` findings currently stay at full weight, but the active rules there are narrow language-aware implementation signals.
-- Practical reading rule: `template-example` means "repo ships this risky template", not "this is definitely enabled right now."
-- Practical reading rule: `docs-example` means "repo ships risky sample guidance", not "this example is active runtime config."
-- Practical reading rule: `plugin-cache` means "installed plugin content is present on disk", not "this file is top-level runtime config"; real secrets still stay critical.
-- Practical reading rule: `plugin-manifest` means "the repo declares this hook behavior", while `hook-code` means "the scanner reached the referenced non-shell implementation."
-- Current edge case: docs-only example trees now re-add the standalone `CLAUDE.md` example file for scanning, but still suppress the rest of the nested example subtree unless a runtime companion exists.
-- Current edge case: tutorial/example bundles outside the current `docs/`, `commands/`, `examples/`, `samples/`, `demo/`, `tutorial/`, `guide/`, `cookbook/`, and `playground/` heuristics can still be treated as live config until broader example-root classification lands.
-- Docs-only nested `CLAUDE.md` roots under `docs/` are now skipped unless runtime config companions exist in the same subtree.
-- Exact `Bash(curl https://...)` and `Bash(wget https://...)` allow entries with pinned literal URLs no longer trigger the generic `permissions-permissive-*` finding; wildcard and dynamic network permissions still do.
-- Exact `Bash(node scripts/foo.js ...)` and `Bash(python3 ./tools/audit.py ...)` wrapper commands no longer trigger the generic interpreter-access finding; inline eval forms such as `node -e` and `python -c` still do.
-- Exact read-only Docker inventory commands such as `Bash(docker ps)` and `Bash(docker image ls)` no longer trigger the generic Docker-access finding; execution-oriented forms such as `docker run` and `docker exec` still do.
-- Exact `settings.local.json` allowlists now downgrade `permissions-no-deny-list` from high to medium when every allow entry is fully specified; wildcard or dynamic project-local permissions still keep the higher severity.
-- Exact local-only `settings.local.json` allowlists now also downgrade `hooks-no-pretooluse` from medium to low; broader or network-capable project-local configs still keep the higher severity.
-- Comment-only shell-hook lines are now ignored by the hook exfiltration, sensitive-path, and silent-fail regex rules, so inline remediation notes and commented examples no longer look like live hook behavior.
-- Narrow specialist agents, subagents, and slash commands now downgrade generic Bash-access and escalation-chain findings from high to medium; broader generalist workflows still keep the higher severity.
-- Repo-scoped filesystem MCP servers using relative paths like `./` now grade lower than unrestricted root/home filesystem access; root-level filesystem exposure still stays high.
-- Defensive agent-review content that mentions patterns like ``fetch(userProvidedUrl)`` no longer triggers `agents-injection-surface`; direct instructions to fetch/process external content still do.
-- `agents-explorer-write` now uses role metadata and the lead agent intro instead of any later workflow/example text, so procedural `search for ...` steps in normal worker prompts no longer get mislabeled as explorer-style agents. Example: `chief-of-staff.md` no longer trips that rule just because it contains `gog gmail search ...`.
-- `agents-oversized-prompt` now measures effective prompt size instead of raw file length, discounting fenced code blocks and Markdown tables. Example-heavy agents like `chief-of-staff.md` and `planner.md` no longer trip the rule, while prose-heavy agents still do.
-- Markdown example/test passwords in example-like paths such as `docs/`, `commands/`, `examples/`, `tutorials/`, and `demos/` are now suppressed when the surrounding context is clearly instructional; that suppression does not apply to normal agent/config markdown.
-
-#### False-Positive Audit Workflow
-
-Use this workflow when a repo scan looks noisy or when you are tuning AgentShield rules.
-
-1. Start with JSON output so you can inspect file paths, `runtimeConfidence`, and score impact directly.
-2. Separate active runtime findings from lower-confidence source kinds before changing any rules.
-3. Validate suspected false positives against at least one real repo and one minimal synthetic fixture.
-4. Prefer source-aware reclassification and wording changes before adding blanket suppression.
-5. Keep real secrets and explicit execution paths visible even inside examples, manifests, or templates.
-6. Re-run targeted tests, then the full gate, before changing release behavior.
-
-Recommended commands:
+Or in watch mode during development:
 
 ```bash
-agentshield scan --path /repo --format json > report.json
-
-jq '.findings | group_by(.runtimeConfidence // "none") | map({
-  runtimeConfidence: (.[0].runtimeConfidence // "none"),
-  count: length
-})' report.json
-
-jq '.findings | group_by(.file) | map({
-  file: .[0].file,
-  count: length
-}) | sort_by(-.count)[:20]' report.json
+npm run dev -- scan --path ~/.config/opencode
 ```
 
-Confidence-first triage commands:
+DataShield auto-discovers `./.claude`, `~/.claude`, or the current directory when `--path`
+is omitted. Discovery skips generated directories (`node_modules`, build output, `.dmux`)
+so transient copies do not duplicate findings.
 
-```bash
-# Highest-signal findings first: active runtime + project-local
-jq '.findings
-  | map(select((.runtimeConfidence // "active-runtime") | IN("active-runtime","project-local-optional")))
-  | map(select(.severity | IN("critical","high","medium")))
-  | map({file, severity, runtimeConfidence, title})' report.json
+## Config-Driven Discovery
 
-# Lower-confidence inventory that usually needs interpretation, not suppression
-jq '.findings
-  | map(select((.runtimeConfidence // "") | IN("template-example","docs-example","plugin-cache","plugin-manifest")))
-  | map({file, severity, runtimeConfidence, title})' report.json
-```
+**The first step of every scan is reading the scan configuration.** Discovery is driven
+entirely by it, and it is re-read on every scan — so an operator or a running agent can
+change it between runs and the next scan picks it up.
 
-Recommended audit order:
-- `active-runtime` and `project-local-optional`: treat as highest-signal findings first.
-- `template-example`, `docs-example`, and `plugin-cache`: confirm whether the repo or installed plugin cache is shipping risky guidance versus actually enabling it.
-- `plugin-manifest`: confirm whether the risk is in declarative hook wiring or the referenced implementation.
-- `hook-code`: confirm whether the implementation actually injects context, reads transcripts, or shells out in a risky way.
+Resolution order (low → high priority):
 
-Rule-design guidelines:
-- Prefer source-aware labeling over suppression. If a finding is real but lower confidence, keep it visible and say why.
-- Prefer cross-file context over single-file guesses. Companion manifests and referenced hook implementations usually matter more than isolated config.
-- Prefer narrow, behavior-based `hook-code` rules over generic wrapper heuristics. `spawnSync("bash", ["-lc", "curl ... | bash"])` is high-signal; ordinary `spawnSync("prettier", ...)` is not.
-- Do not downgrade real secrets just because they appear in docs or examples. Structural findings can be downgraded; committed credentials should stay critical.
-- Keep example-root heuristics evidence-based. Today the scanner treats `docs/`, `commands/`, `examples/`, `example/`, `samples/`, `sample/`, `demo/`, `demos/`, `tutorial/`, `tutorials/`, `guide/`, `guides/`, `cookbook/`, and `playground/` as example-like paths.
+1. built-in defaults (`src/config/scan-config.ts`)
+2. `~/.config/datashield/scan.json` (global)
+3. `<scanRoot>/datashield.config.json` (project)
+4. `$DATASHIELD_SCAN_CONFIG` (explicit override)
 
-When you change rule accuracy, update both:
-- [`false-positive-audit.md`](./false-positive-audit.md) with the new baseline and remaining gaps
-- the targeted regression tests for the specific rule family you changed
-- `agentshield scan --corpus-gate` in CI so the built-in attack corpus must stay fully detected; failed corpus gates now include a prioritized accuracy improvement plan by category, missing rule, and missed config
-- the corpus now includes an env proxy/DNS exfiltration fixture so proxy hijack, runtime import mutation, env-token exfiltration, credential-store access, and clipboard access stay covered together
-- if you are filing a scanner-noise bug, start from the audit doc's [`False-Positive Issue Template`](./false-positive-audit.md#false-positive-issue-template)
+Arrays merge additively (new directories/subdirectories/files extend the set); scalar
+toggles are overridden. Invalid JSON or schema violations fail closed.
 
-#### Reducing False Positives In Practice
-
-The current scan profile is not dominated by broken matchers. It is mostly dominated by lower-confidence source kinds that need different interpretation.
-
-Current patterns from the latest live scans:
-- template MCP inventory is still the biggest noise source by count in `everything-claude-code`
-- example/tutorial config needs example-aware wording and weighting, not blanket suppression
-- declarative hook manifests and executable hook implementations need different handling
-- many remaining agent findings are policy findings about intentionally privileged agents, not obvious rule bugs
-- the latest alert review reduced specialist agent-capability severity inflation, repo-scoped filesystem MCP inflation, and template-catalog score inflation; remaining noise is now mostly template count/interpretation and active-runtime remote MCP URLs
-
-Recurring pattern signatures to recognize:
-- one template file dominating the report usually means confidence/weighting work, not a broken matcher
-- broad `agents-*` clusters across files with explicit tool metadata usually mean policy review, not false-positive suppression
-- very small `project-local-optional` clusters usually mean scope is already modeled and only severity may need tuning
-- a repo-scoped filesystem MCP with relative-path args should not be treated like root/home filesystem access
-
-When to open a false-positive issue instead of just triaging the report:
-- the same finding pattern reproduces across at least one real repo and one minimal synthetic fixture
-- the finding is wrong for its own source kind, not just lower-confidence than `active-runtime`
-- the fix needs matcher changes, not just better wording, score weighting, or cross-file context
-- the finding would still be misleading even after reading `runtimeConfidence`
-
-Recommended operating model:
-- Start with `runtimeConfidence` before changing any rule. Separate `active-runtime` from `template-example`, `docs-example`, `plugin-cache`, `plugin-manifest`, and `project-local-optional`.
-- Reclassify before suppressing. If the finding is real but lower confidence, keep it visible and adjust wording or score weight instead of hiding it.
-- Keep secrets on a stricter standard. Real credentials should stay critical even in docs, examples, plugin caches, or manifests.
-- Use cross-file context whenever possible. Settings, manifests, and referenced hook implementations usually need to be read together.
-- For `hook-code`, add only narrow language-aware rules for explicit risky behavior. Avoid broad wrapper heuristics.
-- For agent rules, anchor on role metadata and lead instructions before matching arbitrary later prose.
-
-Repo conventions that help AgentShield scan accurately:
-- put reusable MCP catalogs under template paths such as `mcp-configs/` instead of live runtime config files
-- keep local-only overrides in `settings.local.json`
-- keep tutorials and examples under example-like paths such as `docs/`, `examples/`, `tutorials/`, `demos/`, or `guides/`
-- keep `hooks/hooks.json` declarative and put the implementation in separate hook script files
-- keep large agent examples inside fenced code blocks so prompt-size and role heuristics stay accurate
-
-Current high-value places to audit first:
-- files with the highest finding count
-- files with `runtimeConfidence: template-example` or `plugin-cache`
-- `settings.local.json` findings that may be project-local rather than repo-wide
-- `plugin-manifest` findings that need confirmation in the referenced implementation
-- `hook-code` findings that involve context injection, transcript access, or child-process execution
-
-## Features
-
-### Auto-Fix Engine (`--fix`)
-
-Automatically applies safe fixes:
-- Replaces hardcoded secrets with `${ENV_VAR}` references
-- Tightens wildcard permissions (`Bash(*)` → scoped `Bash(git *)`, `Bash(npm *)`)
-
-Only fixes marked `auto: true` are applied. Permission changes require human review.
-
-**Verify-after-fix:** `--fix` does not trust itself. After applying fixes it re-scans the target, and if the posture score regressed or a new high/critical finding appeared (the kind of churn a naive permission tighten can cause), it rolls every modified file back to its original content. On success it prints a tamper-evident attestation digest binding the before/after score and finding deltas, so the kept fixes are provably non-regressing.
-
-### External Rule Packs (`--rule-pack`)
-
-Run community or private detection rules alongside the built-ins, without recompiling:
-
-```bash
-agentshield scan --rule-pack ./my-pack.json
-agentshield scan --rule-pack ./pack-a.json --rule-pack ./pack-b.json   # repeatable
-```
-
-A pack is a JSON file validated with the same fail-closed approach as `--policy` (bad JSON, schema violations, duplicate ids, or an uncompilable regex abort the scan):
+Example project override:
 
 ```json
 {
   "version": 1,
-  "name": "my-pack",
-  "rules": [
-    {
-      "id": "tool-poisoning-001",
-      "name": "Tool description poisoning",
-      "description": "Hidden instruction in a tool description",
-      "severity": "high",
-      "category": "injection",
-      "patterns": ["ignore (?:all )?previous instructions"],
-      "fileTypes": ["agent-md", "claude-md"]
-    }
-  ]
-}
-```
-
-Each pattern is a JS regex run against file content; `fileTypes` is optional and scopes a rule to specific config types. External findings count toward the overall grade. Anyone with a pack in this shape can plug in.
-
-### Secure Init (`agentshield init`)
-
-Generates a hardened `.claude/` directory with scoped permissions, safety hooks, and security best practices. Existing files are never overwritten.
-
-### Claude Opus Deep Analysis (`--opus`)
-
-Three-agent adversarial pipeline powered by Claude Opus (claude-opus-5 by default; the injection tester uses claude-sonnet-5):
-
-1. **Red Team (Attacker)** — finds exploitable attack vectors and multi-step chains
-2. **Blue Team (Defender)** — evaluates existing protections and recommends hardening
-3. **Auditor** — synthesizes both perspectives into a prioritized risk assessment
-
-The Attacker finds that `curl` hooks with `${file}` interpolation + `Bash(*)` = command injection pivot. The Defender notes no PreToolUse hooks exist to stop it. The Auditor chains them into a prioritized action list.
-
-```bash
-agentshield scan --opus              # Red + Blue run in parallel
-agentshield scan --opus --stream     # Sequential with real-time output
-agentshield scan --opus --stream -v  # Verbose — see full agent reasoning
-```
-
-```
-  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-  ┃  Phase 1a: ATTACKER (Red Team)                       ┃
-  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-
-  ✓ Attacker analysis complete (4521 tokens)
-
-  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-  ┃  Phase 1b: DEFENDER (Blue Team)                      ┃
-  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-
-  ✓ Defender analysis complete (3892 tokens)
-
-  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-  ┃  Phase 2: AUDITOR                                    ┃
-  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-
-  Risk Level: CRITICAL
-  Opus Score: █████░░░░░░░░░░░░░░░ 15/100
-```
-
-Requires `ANTHROPIC_API_KEY` environment variable.
-
-#### OrcaRouter provider
-
-The `--opus` and `--injection` analysis modes can also run through
-[OrcaRouter](https://www.orcarouter.ai), an OpenAI/Anthropic-compatible gateway
-that routes each request to the most cost-effective upstream model:
-
-```bash
-export ORCAROUTER_API_KEY=your-key-here
-agentshield scan --opus --provider orcarouter
-agentshield scan --injection --provider orcarouter
-```
-
-The provider points the Anthropic client at `https://api.orcarouter.ai` and
-uses the gateway's namespaced model ids (e.g. `anthropic/claude-sonnet-5`,
-`anthropic/claude-opus-5`). The default provider remains Anthropic.
-
-With `--provider orcarouter` the scanned configuration contents are sent to
-OrcaRouter's API instead of Anthropic's, so do not use it on configs containing
-secrets you have not redacted.
-
-### Compliance Mapping (`--compliance`)
-
-Map findings to audit-framework control IDs so GRC teams get an auditor-ready coverage artifact instead of a raw findings list:
-
-```bash
-agentshield scan --compliance soc2          # SOC 2 Trust Services Criteria
-agentshield scan --compliance pci,iso       # comma-separated
-agentshield scan --compliance all           # SOC 2 + PCI DSS + ISO 27001
-```
-
-Each framework prints a control-coverage table (control id, title, highest severity, finding count, examples), ordered by severity:
-
-```
-## Compliance Mapping: SOC 2 (Trust Services Criteria)
-
-Mapped 194/194 findings to 5 control(s). 0 finding(s) had no mapped control.
-
-| Control | Title                        | Highest  | Findings | Examples |
-| CC6.1   | Logical access - credentials | critical | 76       | Hardcoded Anthropic API key; ... |
-```
-
-Mapping is finding-category-level guidance (SOC 2, PCI DSS v4.0, ISO/IEC 27001:2022 Annex A), not a certified crosswalk; confirm control applicability with your auditor.
-
-### Output Formats
-
-| Format | Flag | Use Case |
-|--------|------|----------|
-| Terminal | `--format terminal` (default) | Interactive use |
-| JSON | `--format json` | CI pipelines, programmatic access |
-| Markdown | `--format markdown` | Documentation, PRs |
-| HTML | `--format html` | Executive report with risk posture and priorities |
-| Evidence pack | `--evidence-pack <dir>` | Audit and buyer reviews |
-| Remediation plan | `--remediation-plan <path>` | Stable-fingerprint fix queue for CI and ticketing |
-
-Evidence packs write a deterministic directory containing `manifest.json`,
-`README.md`, `agentshield-report.json`, `agentshield-report.html`,
-`agentshield-results.sarif`, `policy-evaluation.json`,
-`baseline-comparison.json`, `supply-chain.json`, and
-`ci-context.json`, and `remediation-plan.json`. The manifest records SHA-256
-digests and byte counts for bundle artifacts plus a bundle digest over the
-machine-readable evidence. `ci-context.json` records whitelisted GitHub Actions
-workflow, commit, run, and runner provenance without copying arbitrary
-environment variables into the bundle.
-Redaction is enabled by default for local paths, usernames, emails, and
-token-shaped strings; use `--no-evidence-redact` only for private internal
-bundles.
-
-Remediation plans write a JSON queue of findings with stable hashed
-fingerprints, severity, file, fixability, ordered workflow phases, and the
-recommended next command. The workflow phases route safe auto-fixes first,
-manual-review findings second, and verification last so maintainers can attach
-the plan to CI tickets without turning every finding into a separate thread.
-They intentionally omit raw evidence and fix before/after values so teams can
-attach the plan to tickets without copying token-shaped strings.
-
-Verify a saved evidence pack before attaching it to CI artifacts or customer
-handoffs:
-
-```bash
-agentshield evidence-pack verify ./agentshield-evidence
-agentshield evidence-pack verify ./agentshield-evidence --json
-```
-
-Inspect a verified evidence pack when a downstream GitHub App, Linear sync, or
-security-review workflow needs a compact readback without opening every artifact:
-
-```bash
-agentshield evidence-pack inspect ./agentshield-evidence
-agentshield evidence-pack inspect ./agentshield-evidence --json
-```
-
-Aggregate multiple verified evidence packs when an operator needs fleet-level
-routing across repos, teams, or harnesses. The JSON output includes
-`operatorReadback` for promotion status/digest checks and `reviewItems` with
-source evidence paths and owner-ready recommendations for packs that need
-follow-up:
-
-```bash
-agentshield evidence-pack fleet ./repo-a-evidence ./repo-b-evidence
-agentshield evidence-pack fleet ./repo-a-evidence ./repo-b-evidence --json
-```
-
-`operatorReadback` is the stable field for downstream GitHub App, Linear, or
-ECC Tools routing. It reports `ready`, `status`, `digest`, owner counts,
-blocking review counts, approval routes, deterministic `approvalIds`, and the
-next operator action so fleet promotion can be gated without parsing terminal
-prose. Each review item also carries the same `approvalId` plus a
-Linear-friendly ticket `externalId`, allowing sync jobs to dedupe owner approval
-threads across reruns.
-
-### JSON Report Shape
-
-`agentshield scan --format json` is the supported machine-readable scanner interface today.
-
-```json
-{
-  "timestamp": "2026-03-13T19:42:00.000Z",
-  "targetPath": "/repo/.claude",
-  "score": {
-    "grade": "C",
-    "numericScore": 66,
-    "breakdown": {
-      "secrets": 100,
-      "permissions": 70,
-      "hooks": 80,
-      "mcp": 35,
-      "agents": 45
-    }
-  },
-  "summary": {
-    "totalFindings": 29,
-    "critical": 1,
-    "high": 7,
-    "medium": 8,
-    "low": 10,
-    "info": 3,
-    "filesScanned": 17,
-    "autoFixable": 2,
-    "defenses": 4
-  },
-  "defenses": [
-    {
-      "id": "defense-deny-list",
-      "title": "Permission deny list",
-      "file": ".claude/settings.json",
-      "detail": "6 deny rules; covers .env, ~/.ssh, curl, sudo, rm -rf. Deny wins over allow regardless of specificity.",
-      "harness": "claude-code"
-    }
+  "ignoredDirs": ["node_modules", "dist"],
+  "genericScan": true,
+  "genericScanExamples": false,
+  "directories": [
+    { "path": "leaks", "type": "text-generic", "recursive": true }
   ],
-  "findings": [
-    {
-      "id": "mcp-risky-filesystem",
-      "severity": "medium",
-      "category": "mcp",
-      "title": "Template defines risky MCP server: filesystem",
-      "description": "Repository template includes a high-risk filesystem MCP server.",
-      "file": "mcp-configs/mcp-servers.json",
-      "runtimeConfidence": "template-example"
-    }
+  "extensions": [
+    { "extension": ".pem", "type": "text-generic" }
   ]
 }
 ```
 
-Notes:
-- `runtimeConfidence` is emitted for active runtime config, `settings.local.json`, docs/examples, installed Claude plugin caches, plugin manifests, and manifest-resolved non-shell hook code.
-- `harnessAdapters` is local marker evidence only. It does not call external services or imply a hosted/team entitlement.
-- Adapter `confidence` is `strong` when a primary harness marker exists, and `partial` when only supporting directories or secondary markers are present.
-- `active-runtime` means active config such as `.mcp.json`, `mcp.json`, `.claude/mcp.json`, `.claude.json`, or active `settings.json`.
-- `project-local-optional` means project-local settings such as `settings.local.json`.
-- `template-example` means template/catalog files such as `mcp-configs/` or `config/mcp/`.
-- `docs-example` means docs/tutorial/example content such as `docs/guide/settings.json` or `commands/*.md`.
-- `plugin-cache` means installed Claude plugin cache content such as `.claude/plugins/cache/...`.
-- `plugin-manifest` means declarative hook manifests such as `hooks/hooks.json`.
-- `hook-code` means a manifest-resolved non-shell implementation such as `scripts/hooks/session-start.js`.
-- Recognized defenses (`defenses[]` in JSON, "Recognized Defenses" in terminal and markdown) are credited, never penalized, and never add points.
-- Score weighting discounts non-secret `template-example` and `docs-example` findings to `0.25x`, non-secret `project-local-optional` findings to `0.75x`, and non-secret `plugin-cache` / `plugin-manifest` findings to `0.5x`; committed secrets still count at full weight. Non-secret `template-example` findings are also capped at `10` deduction points per file and score category. See [`false-positive-audit.md`](./false-positive-audit.md).
+### Discovery model
 
-## API Reference
+- **Exact files** (`files`): `CLAUDE.md`, `AGENTS.md`, `settings.json`, `opencode.json`, …
+- **Directories** (`directories`): `skills/`, `agents/`, `commands/`, `.opencode/*`, …
+  with optional `recursive: true` to walk nested per-item folders.
+- **Generic scan** (`genericScan`): recursively classifies arbitrary files by extension
+  (`.md`, `.txt`, `.env`, `.json`, `.yaml`, `.toml`, `.ini`, …). Example-like subtrees
+  (`docs/`, `examples/`, `tutorials/`, …) are skipped unless `genericScanExamples` is on.
 
-AgentShield currently has three distinct automation surfaces:
-
-- CLI: `agentshield scan`, `agentshield init`, and `agentshield miniclaw start`
-- Scanner report JSON/SARIF: `agentshield scan --format json` or `agentshield scan --format sarif --output agentshield.sarif`
-- Organization policy gate: `agentshield scan --policy agentshield-policy.json`
-- MiniClaw package + HTTP API: `ecc-agentshield/miniclaw`
-
-Important packaging note:
-- The npm package root export currently points at the CLI entrypoint, not a semver-stable scanner library module.
-- Internal scanner modules such as `src/scanner/index.ts` and `src/reporter/score.ts` are useful for contributors, but they should not be documented as supported `import` paths for package consumers yet.
-- If you need automation around scanner results today, prefer the JSON report format over importing scanner internals from the package root.
-
-Detailed request/response and schema notes live in [`API.md`](./API.md).
-
-## GitHub Action
-
-```yaml
-- name: AgentShield Security Scan
-  uses: affaan-m/agentshield@v1
-  with:
-    path: "."
-    min-severity: "medium"
-    fail-on-findings: "true"
-```
-
-**Inputs:**
-
-| Input | Default | Description |
-|-------|---------|-------------|
-| `path` | `.` | Path to scan |
-| `min-severity` | `medium` | Minimum severity: critical, high, medium, low, info |
-| `fail-on-findings` | `true` | Fail the action if findings meet severity threshold |
-| `format` | `terminal` | Output format: terminal, json, markdown, sarif |
-| `sarif-output` | `agentshield-results.sarif` | SARIF output path when `format` is `sarif` |
-| `baseline` | `""` | Optional AgentShield baseline JSON path for drift comparison |
-| `save-baseline` | `""` | Optional path to write the current scan as a new baseline |
-| `policy` | `""` | Optional organization policy JSON path |
-| `fail-on-policy` | `true` | Fail the action if the organization policy is non-compliant |
-| `supply-chain` | `true` | Verify MCP npm/git package provenance and known malicious package risk |
-| `supply-chain-online` | `false` | Query npm registry metadata during supply-chain verification |
-| `fail-on-supply-chain` | follows `fail-on-findings` | Fail the action when supply-chain verification finds critical or high package risks |
-| `evidence-pack` | `""` | Optional directory for a portable audit evidence bundle |
-| `verify-evidence-pack` | `true` | Verify evidence-pack artifact hashes after writing |
-| `policy-promotion-manifest` | `""` | Optional policy export manifest to verify and promote or dry-run |
-| `policy-promotion-pack` | `""` | Policy pack id when the manifest contains multiple packs |
-| `policy-promotion-output` | `.agentshield/policy.json` | Active policy path to write when promotion dry-run is disabled |
-| `policy-promotion-dry-run` | `true` | Verify promotion review evidence without writing the active policy |
-| `fail-on-policy-promotion` | `false` | Fail when promotion review items still require action |
-
-**Outputs:** `score` (0–100), `grade` (A–F), `total-findings`, `critical-count`, `sarif-path`, `baseline-path`, `baseline-status`, `new-findings`, `resolved-findings`, `unchanged-findings`, `score-delta`, `policy-status`, `policy-violations`, `policy-promotion-status`, `policy-promotion-pack`, `policy-promotion-review-items`, `policy-promotion-action-required-count`, `policy-promotion-digest`, `supply-chain-status`, `supply-chain-risky-packages`, `supply-chain-critical-count`, `supply-chain-high-count`, `package-manager-hardening-status`, `package-manager-hardening-findings`, `package-manager-hardening-critical-count`, `package-manager-hardening-high-count`, `package-manager-hardening-registry-credentials`, `package-manager-hardening-lifecycle-scripts`, `package-manager-hardening-release-age-gates`, `evidence-pack-path`, `evidence-pack-status`, `evidence-pack-digest`
-
-The action writes a markdown job summary and emits GitHub annotations inline on affected files. When `format: sarif` is set, it also writes a SARIF 2.1.0 report that can be uploaded to GitHub code scanning with `github/codeql-action/upload-sarif`. When `baseline` is set, the action appends a baseline drift summary, emits regression annotations for new findings, and reports `baseline-status` as `passed`, `failed`, `missing`, or `not-run`. When `policy` is set, the SARIF report includes organization-policy violations as `agentshield-policy/*` code-scanning results, appends the organization policy result to the job summary, emits policy violation annotations, and fails by default unless `fail-on-policy: "false"` is set. When `policy-promotion-manifest` is set, the action verifies the selected policy export digest, emits promotion review-item counts, appends the owner/protected-rollout/runtime-smoke review items to the job summary, and marks runtime smoke as verified when the same job also scans with the promoted policy. Supply-chain verification runs offline by default for MCP package references, appends package-risk evidence to the job summary, writes real `supply-chain.json` evidence packs, and fails on critical/high package risk whenever the action is in failing mode unless `fail-on-supply-chain: "false"` is set. Package-manager hardening outputs and job-summary evidence separately count plaintext registry credentials, lifecycle-script drift, and release-age gate drift so CI and hosted consumers can route supply-chain configuration risk even when the main finding gate is collecting evidence only.
-
-Baseline drift gate:
-
-```yaml
-- name: AgentShield Drift Gate
-  uses: affaan-m/agentshield@v1
-  with:
-    path: "."
-    baseline: ".github/agentshield-baseline.json"
-    fail-on-findings: "false"
-```
-
-Use `fail-on-findings: "false"` when the workflow should fail only on drift from the baseline. Keep the default `fail-on-findings: "true"` when any current finding at or above `min-severity` should still fail the action.
-
-## CLI Reference
-
-```
-agentshield scan [options]         Scan configuration directory
-  -p, --path <path>                Path to scan (default: ~/.claude or cwd)
-  -f, --format <format>            Output: terminal, json, markdown, html, sarif
-  -o, --output <path>              Write the primary report output to a file
-  --fix                            Auto-apply safe fixes
-  --opus                           Enable Claude Opus multi-agent analysis
-  --provider <provider>            LLM provider for --opus/--injection: anthropic or orcarouter
-  --stream                         Stream Opus analysis in real-time
-  --injection                      Run active prompt injection testing
-  --sandbox                        Execute hooks in a sandbox and observe behavior
-  --taint                          Run taint analysis (data flow tracking)
-  --deep                           Run injection + sandbox + taint + opus together
-  --log <path>                     Write structured scan logs to a file
-  --log-format <format>            Log format: ndjson or json
-  --corpus                         Run built-in attack corpus benchmark
-  --corpus-gate                    Fail if the built-in attack corpus regresses
-  --baseline <path>                Compare against a baseline file
-  --save-baseline <path>           Save current scan results as a baseline file
-  --gate                           Fail on new critical/high findings or score drop
-  --supply-chain                   Verify MCP package provenance and risk
-  --supply-chain-online            Include npm registry metadata
-  --compliance <frameworks>        Map findings to controls: soc2, pci, iso, all
-
-  --rule-pack <path>               Load an external JSON rule pack (repeatable)
-  --policy <path>                  Validate against an organization policy
-  --evidence-pack <dir>            Write portable evidence bundle
-  --remediation-plan <path>        Write stable-fingerprint JSON remediation plan
-  --no-evidence-redact             Disable evidence-pack redaction
-  --min-severity <severity>        Filter: critical, high, medium, low, info
-  -v, --verbose                    Show detailed output
-
-agentshield init                   Generate secure baseline config
-agentshield baseline write         Write a scan baseline JSON file
-agentshield evidence-pack fleet    Summarize multiple evidence packs for routing
-agentshield evidence-pack inspect  Verify and summarize an evidence bundle
-agentshield evidence-pack verify   Verify artifact and bundle digests
-agentshield policy export          Export policy packs plus checksum manifest
-agentshield policy init            Generate an organization policy preset
-agentshield policy promote         Verify and promote an exported policy
-```
-
-Report footer CTA: terminal and markdown reports can append a one-line ECC
-Tools Pro footer. It is off by default. Set `AGENTSHIELD_CTA=1` (or
-`ECC_CTA=1`) to enable it; set `AGENTSHIELD_NO_CTA=1` (or `ECC_NO_CTA=1`) to
-hard-suppress it, which wins over opt-in. JSON and SARIF output never include
-it.
-
-Baseline write:
-
-```bash
-agentshield baseline write --path .claude --output .github/agentshield-baseline.json
-agentshield baseline write --path .claude --output baseline.json --json
-```
-
-The baseline command is a first-class wrapper around the existing scan baseline
-format. New baselines store stable hashed evidence fingerprints and omit raw
-evidence values, so teams can keep baseline snapshots in CI without copying
-token-shaped strings into long-lived artifacts. Existing raw-evidence baselines
-remain comparable during migration. Use it to create the accepted snapshot,
-then compare future scans with
-`agentshield scan --baseline .github/agentshield-baseline.json --gate`.
-
-Runtime monitor lifecycle:
-
-```bash
-# Install the PreToolUse runtime monitor
-agentshield runtime install
-
-# Check whether the hook, policy, and log path are healthy
-agentshield runtime status --check
-
-# Back up invalid runtime files and restore a healthy install
-agentshield runtime repair
-```
-
-Organization policy files support enterprise metadata and temporary exceptions:
-
-```bash
-agentshield policy init --pack enterprise --owner security-platform@acme.example
-agentshield policy init --pack regulated --name "Acme Regulated Policy"
-agentshield policy export --output-dir .github/agentshield-policies --owner security-platform@acme.example
-agentshield policy export --pack ci-enforcement --name-prefix "Acme" --json
-agentshield policy promote --manifest .github/agentshield-policies/manifest.json --pack ci-enforcement --output .agentshield/policy.json
-agentshield policy promote --manifest .github/agentshield-policies/manifest.json --pack ci-enforcement --dry-run --json
-```
-
-Policy pack presets are starter baselines, not hidden SaaS policy. `oss` keeps
-public repos permissive while requiring destructive-command deny entries;
-`team` adds the runtime hook; `enterprise` raises score gates and blocks broad
-tool allowlists; `regulated` disallows critical/high findings and bans broader
-MCP/tool surfaces; `high-risk-hooks-mcp` focuses on hook/MCP-heavy repos; and
-`ci-enforcement` is tuned for branch-protection evidence.
-
-Policy export writes one JSON policy file per selected pack plus a
-`manifest.json` containing SHA-256 digests. This gives platform teams a stable
-artifact bundle for branch-protection review, audit attachment, or downstream
-policy promotion without relying on generated console output.
-
-Policy promotion is the review gate for those exported bundles. It reads the
-export manifest, verifies the selected policy file digest, validates the policy
-schema, and only then writes the active policy path. Use `--dry-run --json` in
-review workflows to prove the exact pack, source file, output path, owner list,
-and digest before a protected branch or operator copies the policy into place.
-Promotion results also include `reviewItems` for owner approval, protected PR
-rollout, and the runtime smoke test needed before enabling an enforcing CI gate.
-
-```json
-{
-  "version": 1,
-  "name": "Acme Corp Security Policy",
-  "policy_pack": "enterprise",
-  "owners": ["security-platform@acme.example"],
-  "min_score": 85,
-  "max_severity": "high",
-  "required_deny_list": ["Bash(rm -rf"],
-  "exceptions": [
-    {
-      "id": "AS-EX-001",
-      "rule": "required_hooks",
-      "owner": "security-platform@acme.example",
-      "reason": "Legacy repository migration window",
-      "expires_at": "2026-06-30T23:59:59.000Z",
-      "scope": "agentshield",
-      "ticket": "SEC-1234"
-    }
-  ]
-}
-```
-
-Policy evaluation now includes an exception lifecycle audit in terminal output
-and GitHub Action summaries: total exceptions, active exceptions, exceptions
-expiring within seven days, expired exceptions, owners, tickets, scopes, and
-days until expiry. This keeps temporary waivers visible in branch-protection
-evidence instead of letting them become silent permanent bypasses.
-
-Exit codes:
-- `0`: scan completed without critical findings
-- `1`: CLI usage or runtime error
-- `2`: scan completed and found at least one critical issue
-
-## Security Rules Summary
-
-| Category | Rules | Patterns | Severity Range |
-|----------|-------|----------|----------------|
-| Secrets | 10 | 14 | Critical -- Medium |
-| Permissions | 10 | -- | Critical -- Medium |
-| Hooks | 34 | -- | Critical -- Low |
-| MCP Servers | 23 | -- | Critical -- Info |
-| Agents | 25 | -- | Critical -- Info |
-| **Total** | **102** | **14** | |
-
-## Architecture
-
-```
-src/
-├── index.ts              CLI entry point (commander)
-├── action.ts             GitHub Action entry point
-├── types.ts              Type system + Zod schemas
-├── scanner/
-│   ├── discovery.ts      Config file discovery
-│   └── index.ts          Scan orchestrator
-├── rules/
-│   ├── index.ts          Rule registry
-│   ├── secrets.ts        Secret detection (10 rules, 14 patterns)
-│   ├── permissions.ts    Permission audit (17 rules)
-│   ├── mcp.ts            MCP server security (26 rules)
-│   ├── hooks.ts          Hook analysis (40 rules)
-│   └── agents.ts         Agent config review (41 rules)
-├── reporter/
-│   ├── score.ts          Scoring engine (A-F grades)
-│   ├── terminal.ts       Color terminal output
-│   ├── json.ts           JSON + Markdown output
-│   └── html.ts           Self-contained HTML report
-├── fixer/
-│   ├── transforms.ts     Fix transforms (secret, permission, generic)
-│   └── index.ts          Fix engine orchestrator
-├── init/
-│   └── index.ts          Secure config generator
-└── opus/
-    ├── prompts.ts        Attacker/Defender/Auditor system prompts
-    ├── pipeline.ts       Three-agent Claude Opus pipeline
-    └── render.ts         Opus analysis rendering
-```
-
-## MiniClaw
-
-MiniClaw is a minimal, sandboxed AI agent runtime bundled with AgentShield. Where typical agent platforms expose many attack surfaces (Telegram, Discord, email, community plugins), MiniClaw presents a **single HTTP endpoint** backed by an **isolated sandbox**.
-
-```bash
-# Start with secure defaults (localhost:3847, no network, safe tools only)
-npx ecc-agentshield miniclaw start
-
-# Custom configuration
-npx ecc-agentshield miniclaw start --port 4000 --network localhost --rate-limit 20
-```
-
-Or use as a library:
-
-```typescript
-import { startMiniClaw } from 'ecc-agentshield/miniclaw';
-
-const { server, stop } = startMiniClaw();
-// Listening on http://localhost:3847
-```
-
-MiniClaw-specific package exports and HTTP endpoints are documented in [`src/miniclaw/README.md`](./src/miniclaw/README.md) and summarized in [`API.md`](./API.md). The React dashboard source lives in [`src/miniclaw/dashboard.tsx`](./src/miniclaw/dashboard.tsx), but it is not yet published as a separate npm subpath.
-
-### Security Model
-
-Four independently enforced layers:
-
-```
-Request → [Rate Limit] → [CORS] → [Size Cap] → [Sanitize Prompt]
-                                                       ↓
-                                                 [Tool Whitelist]
-                                                       ↓
-                                                   [Sandbox FS]
-                                                       ↓
-                                                 [Filter Output] → Response
-```
-
-- **Server** — Rate limiting (10 req/min/IP), CORS, 10KB request cap, localhost-only binding
-- **Prompt Router** — Strips 12+ injection pattern categories (system prompt overrides, identity reassignment, jailbreaks, data exfiltration URLs, zero-width Unicode, base64 payloads)
-- **Tool Whitelist** — Three tiers: Safe (read/search/list), Guarded (write/edit), Restricted (bash/network — disabled by default)
-- **Sandbox** — Isolated filesystem per session, path traversal blocked, symlink escape detection, extension whitelist, 10MB file cap, 5-min timeout, no network by default
-
-### HTTP API
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/prompt` | Send a prompt |
-| `POST` | `/api/session` | Create a sandboxed session |
-| `GET` | `/api/session` | Session info |
-| `DELETE` | `/api/session/:id` | Destroy session + cleanup |
-| `GET` | `/api/events/:sessionId` | Security audit events |
-| `GET` | `/api/health` | Health check |
-
-MiniClaw has **zero external runtime dependencies** — Node.js built-ins only (`http`, `fs`, `path`, `crypto`). The optional React dashboard requires React 18+ as a peer dependency.
 ## Development
 
 ```bash
-npm install          # Install dependencies
-npm run dev          # Development mode
-npm test             # Run tests
-npm run test:coverage # Coverage report
-npm run typecheck    # Type check
-npm run build        # Build
-npm run scan:demo    # Demo scan against vulnerable examples
+npm install
+npm run build       # tsup → dist/
+npm test            # vitest, full suite
+npm run typecheck   # tsc --noEmit
+npm run lint        # eslint src/
 ```
 
-## Distribution
+Run a single suite:
 
-AgentShield is available through multiple channels:
-
-| Channel | Use Case | Install |
-|---------|----------|---------|
-| **Standalone CLI** | Direct scanning from your terminal | `npm install -g ecc-agentshield` or `npx ecc-agentshield scan` |
-| **GitHub Action** | Automated security checks on PRs in CI/CD | `uses: affaan-m/agentshield@v1` |
-| **ECC Plugin** | Claude Code users via the ECC skill ecosystem | Install through [Everything Claude Code](https://github.com/affaan-m/everything-claude-code) |
-| **ECC Tools GitHub App** | Integrated scanning across your GitHub org | Install at [github.com/apps/ecc-tools](https://github.com/apps/ecc-tools) |
-| **ECC Tools Pro** | GitHub App with automated repo analysis, Stripe billing ($19/seat/mo) | [Install](https://github.com/apps/ecc-tools) |
-## FAQ
-
-### What is AgentShield?
-
-AgentShield is a **security auditor for AI agent configurations**. It scans Claude Code setups for hardcoded secrets, permission misconfigs, hook injection, MCP server risks, and agent prompt injection vectors.
-
-| Feature | Description |
-|---------|-------------|
-| **Security Auditor** | Scans `.claude/` directory for vulnerabilities |
-| **Multiple Surfaces** | CLI, GitHub Action, GitHub App integration |
-| **Auto-Fix** | Replaces hardcoded secrets with env var references |
-| **Graded Reports** | Security score (0-100) with findings breakdown |
-| **Opus Pipeline** | Three-agent adversarial analysis with Anthropic API |
-| **Evidence Pack** | Portable audit bundle for compliance |
-
-### What can AgentShield detect?
-
-| Category | Examples |
-|----------|----------|
-| **Secrets** | Hardcoded API keys, tokens, private keys, connection strings |
-| **Permissions** | Overly permissive allow rules like `Bash(*)` |
-| **Hooks** | Hook injection vectors, unsafe hooks |
-| **MCP Servers** | MCP server risks, malicious MCP configs |
-| **Agents** | Agent prompt injection vectors |
-
-### How to get started?
-
-**Quick Start (no install):**
 ```bash
-npx ecc-agentshield scan
+npx vitest run tests/rules/secrets.test.ts
+npx vitest run tests/config/scan-config.test.ts
 ```
 
-**Install globally:**
-```bash
-npm install -g ecc-agentshield
-agentshield scan
-```
+Rules are modules exporting `ReadonlyArray<Rule>`; each rule has
+`check(file, allFiles)`. New detection modules live in `src/rules/` and are registered in
+`src/rules/index.ts`. The scan configuration lives in `src/config/scan-config.ts`.
 
-**Auto-fix safe issues:**
-```bash
-agentshield scan --fix
-```
+## Roadmap
 
-### What output formats are available?
+| Phase | Scope | Status |
+|---|---|---|
+| 0 | Config-driven discovery, recursion, generic scan, rebrand | done |
+| 1 | Secret detection: provider catalogue + high-entropy generic secrets | done |
+| 2 | PII module (RF + international) with validators (Luhn, INN/SNILS checksum) | done |
+| 3 | Credentials module (login/password pairs, Basic auth, `.env`) | done |
+| 4 | One-time codes module (OTP/TOTP/2FA/recovery/PIN) | done |
+| 5 | Scoring/reporting for new categories, precision tuning | done |
 
-| Format | Use Case |
-|--------|----------|
-| **Default** | Terminal graded security report |
-| **JSON** | CI pipelines and automation |
-| **HTML** | Executive security report |
-| **Evidence Pack** | Portable audit bundle for compliance |
+## Attribution
 
-### What is the Opus Pipeline?
-
-The Opus Pipeline is a **three-agent adversarial analysis** that runs on Claude Opus through the Anthropic API:
-1. **Attacker**: hunts for exploitable weaknesses in the scanned config
-2. **Defender**: proposes concrete hardening for each weakness
-3. **Auditor**: reconciles both views into a ranked risk assessment
-
-**Usage:**
-```bash
-agentshield scan --opus --stream
-```
-
-### What is MiniClaw?
-
-MiniClaw is a **sandboxed agent runtime** included with AgentShield:
-- **Prompt Router**: Strips 12+ injection pattern categories
-- **Tool Whitelist**: Safe/Guarded/Restricted tiers
-- **Sandbox**: Isolated filesystem, path traversal blocked
-- **HTTP API**: REST endpoints for session management
-
-### Is AgentShield free and open source?
-
-Yes! AgentShield is **MIT licensed** and free to use. Built at the Claude Code Hackathon (Cerebral Valley x Anthropic, Feb 2026).
-
-### How to contribute?
-
-Contributions welcome! Check the [repository](https://github.com/affaan-m/agentshield) for issues and pull requests. See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
-
-### Where to get help?
-
-| Resource | Link |
-|----------|------|
-| **Repository** | [github.com/affaan-m/agentshield](https://github.com/affaan-m/agentshield) |
-| **npm Package** | [npmjs.com/package/ecc-agentshield](https://www.npmjs.com/package/ecc-agentshield) |
-| **Changelog** | [CHANGELOG.md](./CHANGELOG.md) |
-| **Everything Claude Code** | [github.com/affaan-m/everything-claude-code](https://github.com/affaan-m/everything-claude-code) |
-| **Twitter** | [@affaanmustafa](https://x.com/affaanmustafa) |
+DataShield is a fork of [AgentShield](https://github.com/affaan-m/agentshield) by
+[affaan-m](https://github.com/affaan-m), used under the MIT License. The original rule
+engine, agent-security checks, and much of the infrastructure originate there. See
+[`LICENSE`](./LICENSE) and [`CHANGELOG.md`](./CHANGELOG.md).
 
 ## License
 
 MIT
-
----
-
-<div align="center">
-
-Built by [@affaanmustafa](https://x.com/affaanmustafa) · Part of [Everything Claude Code](https://github.com/affaan-m/everything-claude-code)
-
-</div>

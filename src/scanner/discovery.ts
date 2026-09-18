@@ -1,39 +1,19 @@
-import { readFileSync, existsSync, readdirSync, readlinkSync, statSync, lstatSync } from "node:fs";
-import type { Stats } from "node:fs";
-import { join, basename, extname, relative } from "node:path";
+import {
+  readFileSync,
+  existsSync,
+  readdirSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+  lstatSync,
+} from "node:fs";
+import type { Stats, Dirent } from "node:fs";
+import { join, basename, extname, relative, isAbsolute } from "node:path";
 import type { ConfigFile, ConfigFileType, DanglingSymlink, ScanTarget } from "../types.js";
 import { isExampleLikePath } from "../source-context.js";
+import { loadScanConfig } from "../config/scan-config.js";
+import type { ScanConfig, DirectoryRule } from "../config/scan-config.js";
 import { toPosixPath } from "./paths.js";
-
-const IGNORED_DIRS = new Set([
-  ".dmux",
-  ".git",
-  "node_modules",
-  ".next",
-  ".nuxt",
-  ".turbo",
-  ".cache",
-  "coverage",
-  "dist",
-  "build",
-  "out",
-  "target",
-  "vendor",
-]);
-
-const CLAUDE_ROOT_MARKERS = new Set([
-  "claude.md",
-  "settings.json",
-  "settings.local.json",
-  "mcp.json",
-  ".mcp.json",
-  ".claude.json",
-  "agents.md",
-  "opencode.json",
-]);
-
-/** Directories whose presence makes their parent a scan root. */
-const HARNESS_ROOT_DIRS = new Set([".codex", ".claude-plugin", ".cursor", ".gemini", ".opencode"]);
 
 const CLAUDE_RUNTIME_COMPANION_NAMES: ReadonlyArray<string> = [
   "settings.json",
@@ -83,26 +63,91 @@ const PROJECT_ROOT_HOOK_VARS = new Set([
 ]);
 
 /**
- * Discover all Claude Code configuration files in a directory.
- * Looks for ~/.claude/ structure: CLAUDE.md, settings.json, mcp.json,
- * agents/, skills/, hooks/, rules/, contexts/
+ * Resolved, read-once view of a `ScanConfig` used during a single discovery
+ * pass. Building the Sets/Maps once keeps the recursive walk cheap while still
+ * reading the config fresh on every scan.
  */
-export function discoverConfigFiles(rootPath: string): ScanTarget {
+interface DiscoveryEnv {
+  readonly config: ScanConfig;
+  readonly ignoredDirs: ReadonlySet<string>;
+  readonly harnessRootDirs: ReadonlySet<string>;
+  readonly rootMarkers: ReadonlySet<string>;
+  readonly runtimeCompanions: ReadonlySet<string>;
+  readonly extensionTypes: ReadonlyMap<string, ConfigFileType>;
+  /** Real (symlink-resolved) scan root, used for containment checks. */
+  readonly realScanRoot: string;
+  /** Real directory paths already visited by the configured-directory pass. */
+  readonly visitedConfiguredDirs: Set<string>;
+  /** Real directory paths already visited by the generic scan pass. */
+  readonly visitedGenericDirs: Set<string>;
+  /** Total scan budget: hard caps to bound memory and runtime. */
+  readonly maxFiles: number;
+  readonly maxTotalBytes: number;
+  /** Mutable counters shared across the discovery passes. */
+  readonly budget: { files: number; bytes: number };
+}
+
+function buildDiscoveryEnv(config: ScanConfig, realScanRoot: string): DiscoveryEnv {
+  return {
+    config,
+    ignoredDirs: new Set(config.ignoredDirs),
+    harnessRootDirs: new Set(config.harnessRootDirs),
+    rootMarkers: new Set(config.rootMarkers.map((marker) => marker.toLowerCase())),
+    runtimeCompanions: new Set(CLAUDE_RUNTIME_COMPANION_NAMES),
+    extensionTypes: new Map(
+      config.extensions.map((rule) => [rule.extension.toLowerCase(), rule.type])
+    ),
+    realScanRoot,
+    visitedConfiguredDirs: new Set<string>(),
+    visitedGenericDirs: new Set<string>(),
+    maxFiles: config.maxFiles,
+    maxTotalBytes: config.maxTotalBytes,
+    budget: { files: 0, bytes: 0 },
+  };
+}
+
+function safeRealpath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+/** True when `candidate` is the root or lives inside it (lexically or via realpath). */
+function isWithinRoot(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+/**
+ * Discover all configuration files in a directory.
+ *
+ * The first step is always to resolve the scan configuration (defaults merged
+ * with any global/project/env overrides). Discovery is then driven entirely by
+ * that configuration: exact file names, directory rules (with optional
+ * recursion), and an optional generic content scan by extension.
+ */
+export function discoverConfigFiles(rootPath: string, config?: ScanConfig): ScanTarget {
+  const realScanRoot = safeRealpath(rootPath);
+  const env = buildDiscoveryEnv(config ?? loadScanConfig({ scanRoot: rootPath }), realScanRoot);
   const files: ConfigFile[] = [];
   const danglingSymlinks: DanglingSymlink[] = [];
   const seenFiles = new Set<string>();
   const claudeRoots = new Set<string>([rootPath]);
   const exampleClaudeFiles = new Set<string>();
 
-  walkForClaudeRoots(rootPath, rootPath, claudeRoots, exampleClaudeFiles);
+  walkForClaudeRoots(rootPath, rootPath, claudeRoots, exampleClaudeFiles, env);
 
   for (const exampleClaudeFile of [...exampleClaudeFiles].sort()) {
-    addDiscoveredFile(rootPath, exampleClaudeFile, "claude-md", files, seenFiles);
+    addDiscoveredFile(rootPath, exampleClaudeFile, "claude-md", files, seenFiles, env);
   }
 
   for (const claudeRoot of [...claudeRoots].sort()) {
-    scanClaudeRoot(rootPath, claudeRoot, files, seenFiles, danglingSymlinks);
+    scanClaudeRoot(rootPath, claudeRoot, files, seenFiles, danglingSymlinks, env);
   }
+
+  discoverGenericContent(rootPath, rootPath, files, seenFiles, danglingSymlinks, env);
 
   return { path: rootPath, files, danglingSymlinks };
 }
@@ -116,6 +161,24 @@ function statOrNull(path: string): Stats | null {
     return statSync(path);
   } catch {
     return null;
+  }
+}
+
+const MAX_GENERIC_FILE_BYTES = 5_000_000;
+
+function safeReaddir(dirPath: string): ReadonlyArray<string> {
+  try {
+    return readdirSync(dirPath);
+  } catch {
+    return [];
+  }
+}
+
+function safeReaddirDirents(dirPath: string): ReadonlyArray<Dirent> {
+  try {
+    return readdirSync(dirPath, { withFileTypes: true });
+  } catch {
+    return [];
   }
 }
 
@@ -135,32 +198,48 @@ function readSymlinkTarget(path: string): string {
   }
 }
 
+/**
+ * Record a dangling symlink once. Multiple discovery passes (configured dirs
+ * and the generic scan) can reach the same broken link; dedup by path keeps
+ * the report stable.
+ */
+function addDanglingSymlink(
+  danglingSymlinks: DanglingSymlink[],
+  path: string,
+  target: string,
+  type: ConfigFileType
+): void {
+  if (danglingSymlinks.some((entry) => entry.path === path)) return;
+  danglingSymlinks.push({ path, target, type });
+}
+
 function walkForClaudeRoots(
   scanRoot: string,
   dirPath: string,
   claudeRoots: Set<string>,
-  exampleClaudeFiles: Set<string>
+  exampleClaudeFiles: Set<string>,
+  env: DiscoveryEnv
 ): void {
   if (!statOrNull(dirPath)?.isDirectory()) return;
 
-  const entries = readdirSync(dirPath, { withFileTypes: true });
+  const entries = safeReaddirDirents(dirPath);
   for (const entry of entries) {
     if (entry.isDirectory()) {
-      if (IGNORED_DIRS.has(entry.name)) continue;
-      if (HARNESS_ROOT_DIRS.has(entry.name)) {
+      if (env.ignoredDirs.has(entry.name)) continue;
+      if (env.harnessRootDirs.has(entry.name)) {
         claudeRoots.add(dirPath);
       }
       if (entry.name === ".claude") {
         claudeRoots.add(dirPath);
         continue;
       }
-      walkForClaudeRoots(scanRoot, join(dirPath, entry.name), claudeRoots, exampleClaudeFiles);
+      walkForClaudeRoots(scanRoot, join(dirPath, entry.name), claudeRoots, exampleClaudeFiles, env);
       continue;
     }
 
     if (!entry.isFile()) continue;
-    if (CLAUDE_ROOT_MARKERS.has(entry.name.toLowerCase())) {
-      if (isExampleOnlyClaudeRoot(scanRoot, dirPath, entry.name)) {
+    if (env.rootMarkers.has(entry.name.toLowerCase())) {
+      if (isExampleOnlyClaudeRoot(scanRoot, dirPath, entry.name, env)) {
         exampleClaudeFiles.add(join(dirPath, entry.name));
         continue;
       }
@@ -172,7 +251,8 @@ function walkForClaudeRoots(
 function isExampleOnlyClaudeRoot(
   scanRoot: string,
   dirPath: string,
-  markerName: string
+  markerName: string,
+  env: DiscoveryEnv
 ): boolean {
   if (markerName.toLowerCase() !== "claude.md") return false;
 
@@ -187,7 +267,7 @@ function isExampleOnlyClaudeRoot(
     return false;
   }
 
-  const hasRuntimeCompanion = CLAUDE_RUNTIME_COMPANION_NAMES.some((name) =>
+  const hasRuntimeCompanion = [...env.runtimeCompanions].some((name) =>
     existsSync(join(dirPath, name))
   ) || existsSync(join(dirPath, ".claude"));
 
@@ -199,162 +279,166 @@ function scanClaudeRoot(
   claudeRoot: string,
   files: ConfigFile[],
   seenFiles: Set<string>,
-  danglingSymlinks: DanglingSymlink[]
+  danglingSymlinks: DanglingSymlink[],
+  env: DiscoveryEnv
 ): void {
-  // Direct config files
-  const directFiles: ReadonlyArray<[string, ConfigFileType]> = [
-    ["CLAUDE.md", "claude-md"],
-    [".claude/CLAUDE.md", "claude-md"],
-    ["settings.json", "settings-json"],
-    ["settings.local.json", "settings-json"],
-    [".claude/settings.json", "settings-json"],
-    [".claude/settings.local.json", "settings-json"],
-    [".claude/router_runtime.js", "hook-code"],
-    [".claude/setup.mjs", "hook-code"],
-    [".vscode/tasks.json", "settings-json"],
-    [".zed/settings.json", "settings-json"],
-    [".zed/tasks.json", "settings-json"],
-    ["package.json", "package-manager-config"],
-    ["package-lock.json", "package-manager-config"],
-    [".npmrc", "package-manager-config"],
-    [".pnpmrc", "package-manager-config"],
-    [".yarnrc", "package-manager-config"],
-    [".yarnrc.yml", "package-manager-config"],
-    ["pnpm-workspace.yaml", "package-manager-config"],
-    ["pnpm-workspace.yml", "package-manager-config"],
-    [".github/workflows/codeql_analysis.yml", "settings-json"],
-    [".github/workflows/codeql_analysis.yaml", "settings-json"],
-    [".config/gh-token-monitor/token", "hook-script"],
-    [".config/systemd/user/gh-token-monitor.service", "hook-script"],
-    [".local/bin/gh-token-monitor.sh", "hook-script"],
-    ["Library/LaunchAgents/com.user.gh-token-monitor.plist", "settings-json"],
-    ["mcp.json", "mcp-json"],
-    [".mcp.json", "mcp-json"],
-    [".claude/mcp.json", "mcp-json"],
-    [".claude.json", "mcp-json"],
-    ["CLAUDE.local.md", "claude-md"],
-    // Claude Code plugin manifests
-    [".claude-plugin/plugin.json", "plugin-manifest"],
-    [".claude-plugin/marketplace.json", "plugin-manifest"],
-    // Shared and other-harness instruction files
-    ["AGENTS.md", "agents-md"],
-    ["AGENTS.override.md", "agents-md"],
-    [".codex/AGENTS.md", "agents-md"],
-    ["GEMINI.md", "agents-md"],
-    [".gemini/GEMINI.md", "agents-md"],
-    [".github/copilot-instructions.md", "agents-md"],
-    [".cursorrules", "agents-md"],
-    [".windsurfrules", "agents-md"],
-    [".clinerules", "agents-md"],
-    // OpenAI Codex CLI
-    ["config.toml", "codex-toml"],
-    [".codex/config.toml", "codex-toml"],
-    [".codex/hooks.json", "harness-json"],
-    // Hermes agent
-    ["config.yaml", "hermes-yaml"],
-    // Other harness MCP configs share the MCP rule set
-    [".cursor/mcp.json", "mcp-json"],
-    [".codeium/windsurf/mcp_config.json", "mcp-json"],
-    ["mcp_config.json", "mcp-json"],
-    [".roo/mcp.json", "mcp-json"],
-    [".cline/mcp.json", "mcp-json"],
-    ["cline_mcp_settings.json", "mcp-json"],
-    ["mcp_settings.json", "mcp-json"],
-    // Other harness settings and hooks
-    [".cursor/hooks.json", "harness-json"],
-    [".gemini/settings.json", "harness-json"],
-    ["opencode.json", "harness-json"],
-    ["opencode.jsonc", "harness-json"],
-    [".opencode/opencode.json", "harness-json"],
-  ];
-
-  for (const [relativePath, type] of directFiles) {
-    const fullPath = join(claudeRoot, relativePath);
+  // Direct config files (exact names from the scan configuration).
+  for (const rule of env.config.files) {
+    const fullPath = join(claudeRoot, rule.name);
     if (existsSync(fullPath)) {
-      addDiscoveredFile(scanRoot, fullPath, type, files, seenFiles);
+      addDiscoveredFile(scanRoot, fullPath, rule.type, files, seenFiles, env);
     }
   }
 
-  // Scan subdirectories
-  const subdirs: ReadonlyArray<[string, ConfigFileType]> = [
-    ["agents", "agent-md"],
-    [".claude/agents", "agent-md"],
-    ["subagents", "agent-md"],
-    [".claude/subagents", "agent-md"],
-    ["mcp-configs", "mcp-json"],
-    [".claude/mcp-configs", "mcp-json"],
-    ["mcp", "mcp-json"],
-    [".claude/mcp", "mcp-json"],
-    ["configs/mcp", "mcp-json"],
-    ["config/mcp", "mcp-json"],
-    ["skills", "skill-md"],
-    [".claude/skills", "skill-md"],
-    ["hooks", "hook-script"],
-    [".claude/hooks", "hook-script"],
-    [".vscode", "hook-script"],
-    [".zed", "hook-script"],
-    ["rules", "rule-md"],
-    [".claude/rules", "rule-md"],
-    ["contexts", "context-md"],
-    [".claude/contexts", "context-md"],
-    ["commands", "command-md"],
-    [".claude/commands", "command-md"],
-    ["slash-commands", "command-md"],
-    [".claude/slash-commands", "command-md"],
-    // Other harness instruction and agent directories
-    [".github/agents", "agents-md"],
-    [".github/instructions", "agents-md"],
-    [".cursor/rules", "agents-md"],
-    [".windsurf/rules", "agents-md"],
-    [".roo/rules", "agents-md"],
-    [".clinerules", "agents-md"],
-    // Codex agent roles
-    [".codex/agents", "codex-toml"],
-  ];
-
-  for (const [subdir, type] of subdirs) {
-    const dirPath = join(claudeRoot, subdir);
+  // Directory rules, optionally recursive.
+  for (const rule of env.config.directories) {
+    const dirPath = join(claudeRoot, rule.path);
     if (!statOrNull(dirPath)?.isDirectory()) continue;
-
-    const entries = readdirSync(dirPath);
-    for (const entry of entries) {
-      const entryPath = join(dirPath, entry);
-      const entryStat = statOrNull(entryPath);
-      if (entryStat === null) {
-        if (isDanglingSymlink(entryPath)) {
-          danglingSymlinks.push({
-            path: toPosixPath(relative(scanRoot, entryPath)),
-            target: readSymlinkTarget(entryPath),
-            type,
-          });
-        }
-        continue;
-      }
-      if (entryStat.isFile()) {
-        addDiscoveredFile(scanRoot, entryPath, inferType(entry, type), files, seenFiles);
-      }
-    }
+    collectDirectoryFiles(scanRoot, dirPath, rule, files, seenFiles, danglingSymlinks, env);
   }
 
-  discoverHermesProfiles(scanRoot, claudeRoot, files, seenFiles);
-  discoverReferencedHookScripts(scanRoot, claudeRoot, files, seenFiles);
+  discoverHermesProfiles(scanRoot, claudeRoot, files, seenFiles, env);
+  discoverReferencedHookScripts(scanRoot, claudeRoot, files, seenFiles, env);
 }
 
 /**
- * Hermes keeps one config.yaml per profile under profiles/<name>/.
+ * Collect files under a configured directory. When the rule is recursive the
+ * walk descends into nested subdirectories (still honouring ignored dirs), so
+ * skills/agents/commands that use per-item folders are discovered.
  */
+function collectDirectoryFiles(
+  scanRoot: string,
+  dirPath: string,
+  rule: DirectoryRule,
+  files: ConfigFile[],
+  seenFiles: Set<string>,
+  danglingSymlinks: DanglingSymlink[],
+  env: DiscoveryEnv
+): void {
+  const realDir = safeRealpath(dirPath);
+  if (!isWithinRoot(env.realScanRoot, realDir)) return;
+  const visitKey = `${rule.path}\u0000${realDir}`;
+  if (env.visitedConfiguredDirs.has(visitKey)) return;
+  env.visitedConfiguredDirs.add(visitKey);
+
+  const entries = safeReaddir(dirPath);
+  for (const entry of entries) {
+    const entryPath = join(dirPath, entry);
+    const entryStat = statOrNull(entryPath);
+
+    if (entryStat === null) {
+      if (isDanglingSymlink(entryPath)) {
+        addDanglingSymlink(
+          danglingSymlinks,
+          toPosixPath(relative(scanRoot, entryPath)),
+          readSymlinkTarget(entryPath),
+          rule.type
+        );
+      }
+      continue;
+    }
+
+    if (entryStat.isDirectory()) {
+      if (rule.recursive && !env.ignoredDirs.has(entry)) {
+        collectDirectoryFiles(scanRoot, entryPath, rule, files, seenFiles, danglingSymlinks, env);
+      }
+      continue;
+    }
+
+    if (!entryStat.isFile()) continue;
+    if (rule.extensions && !rule.extensions.includes(extname(entry).toLowerCase())) continue;
+
+    addDiscoveredFile(scanRoot, entryPath, inferType(entry, rule.type), files, seenFiles, env);
+  }
+}
+
+/**
+ * Generic content scan: walk the whole tree and classify any file whose
+ * extension is mapped in the configuration. This catches leaks in arbitrary
+ * notes, docs, env files, and configs that live outside known harness
+ * directories. Disabled when `genericScan` is false.
+ */
+function discoverGenericContent(
+  scanRoot: string,
+  dirPath: string,
+  files: ConfigFile[],
+  seenFiles: Set<string>,
+  danglingSymlinks: DanglingSymlink[],
+  env: DiscoveryEnv
+): void {
+  if (!env.config.genericScan) return;
+  if (!statOrNull(dirPath)?.isDirectory()) return;
+
+  const realDir = safeRealpath(dirPath);
+  if (!isWithinRoot(env.realScanRoot, realDir)) return;
+  if (env.visitedGenericDirs.has(realDir)) return;
+  env.visitedGenericDirs.add(realDir);
+
+  const entries = safeReaddir(dirPath);
+  for (const entry of entries) {
+    const entryPath = join(dirPath, entry);
+    const entryStat = statOrNull(entryPath);
+
+    if (entryStat === null) {
+      if (isDanglingSymlink(entryPath)) {
+        addDanglingSymlink(
+          danglingSymlinks,
+          toPosixPath(relative(scanRoot, entryPath)),
+          readSymlinkTarget(entryPath),
+          "unknown"
+        );
+      }
+      continue;
+    }
+
+    if (entryStat.isDirectory()) {
+      if (env.ignoredDirs.has(entry)) continue;
+      const relativeDir = toPosixPath(relative(scanRoot, entryPath));
+      if (!env.config.genericScanExamples && isExampleLikePath(relativeDir)) continue;
+      discoverGenericContent(scanRoot, entryPath, files, seenFiles, danglingSymlinks, env);
+      continue;
+    }
+
+    if (!entryStat.isFile()) continue;
+
+    const relativePath = toPosixPath(relative(scanRoot, entryPath));
+    if (seenFiles.has(relativePath)) continue;
+
+    const type = classifyGenericFile(entry, env);
+    if (type === null) continue;
+
+    addDiscoveredFile(scanRoot, entryPath, type, files, seenFiles, env);
+  }
+}
+
+/**
+ * Classify a file by extension for the generic content scan. `.env` files are
+ * matched by name because `extname(".env")` is empty.
+ */
+function classifyGenericFile(filename: string, env: DiscoveryEnv): ConfigFileType | null {
+  const lower = filename.toLowerCase();
+  if (/^\.env(\.|$)/.test(lower) || lower === ".env") {
+    return "env-file";
+  }
+
+  const ext = extname(lower);
+  if (ext === "") return null;
+  return env.extensionTypes.get(ext) ?? null;
+}
+
 function discoverHermesProfiles(
   scanRoot: string,
   claudeRoot: string,
   files: ConfigFile[],
-  seenFiles: Set<string>
+  seenFiles: Set<string>,
+  env: DiscoveryEnv
 ): void {
   const profilesDir = join(claudeRoot, "profiles");
   if (!statOrNull(profilesDir)?.isDirectory()) return;
-  for (const entry of readdirSync(profilesDir)) {
+  for (const entry of safeReaddir(profilesDir)) {
     const configPath = join(profilesDir, entry, "config.yaml");
     if (statOrNull(configPath)?.isFile()) {
-      addDiscoveredFile(scanRoot, configPath, "hermes-yaml", files, seenFiles);
+      addDiscoveredFile(scanRoot, configPath, "hermes-yaml", files, seenFiles, env);
     }
   }
 }
@@ -397,7 +481,8 @@ function discoverReferencedHookScripts(
   scanRoot: string,
   claudeRoot: string,
   files: ConfigFile[],
-  seenFiles: Set<string>
+  seenFiles: Set<string>,
+  env: DiscoveryEnv
 ): void {
   const hookConfigPaths = [
     "settings.json",
@@ -412,11 +497,17 @@ function discoverReferencedHookScripts(
     const fullPath = join(claudeRoot, relativeConfigPath);
     if (!statOrNull(fullPath)?.isFile()) continue;
 
-    const content = readFileSync(fullPath, "utf-8");
+    let content: string;
+    try {
+      content = readFileSync(fullPath, "utf-8");
+    } catch {
+      continue;
+    }
+
     for (const candidate of extractHookReferencedPaths(content)) {
       const resolvedPath = resolveHookReferencedPath(scanRoot, claudeRoot, candidate);
       if (!resolvedPath) continue;
-      addDiscoveredFile(scanRoot, resolvedPath, inferType(resolvedPath, "hook-script"), files, seenFiles);
+      addDiscoveredFile(scanRoot, resolvedPath, inferType(resolvedPath, "hook-script"), files, seenFiles, env);
     }
   }
 }
@@ -546,12 +637,41 @@ function addDiscoveredFile(
   fullPath: string,
   type: ConfigFileType,
   files: ConfigFile[],
-  seenFiles: Set<string>
+  seenFiles: Set<string>,
+  env: DiscoveryEnv
 ): void {
   const relativePath = toPosixPath(relative(scanRoot, fullPath));
+  if (relativePath.startsWith("..") || isAbsolute(relativePath)) return;
   if (seenFiles.has(relativePath)) return;
 
-  const content = readFileSync(fullPath, "utf-8");
+  // Total scan budget: stop once the file count or byte budget is exhausted.
+  if (env.budget.files >= env.maxFiles) return;
+  if (env.budget.bytes >= env.maxTotalBytes) return;
+
+  // Containment: never follow a symlink that resolves outside the scan root.
+  let realPath: string;
+  try {
+    realPath = realpathSync(fullPath);
+  } catch {
+    return;
+  }
+  if (!isWithinRoot(env.realScanRoot, realPath)) return;
+
+  const stats = statOrNull(fullPath);
+  if (stats !== null && stats.size > MAX_GENERIC_FILE_BYTES) return;
+
+  let content: string;
+  try {
+    content = readFileSync(fullPath, "utf-8");
+  } catch {
+    // Unreadable (permissions, race, binary) — skip rather than abort the scan.
+    return;
+  }
+
+  if (env.budget.bytes + content.length > env.maxTotalBytes) return;
+
   files.push({ path: relativePath, type, content });
   seenFiles.add(relativePath);
+  env.budget.files += 1;
+  env.budget.bytes += content.length;
 }

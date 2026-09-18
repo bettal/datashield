@@ -1,6 +1,7 @@
 import type { Finding, Grade, ReportSummary, SecurityReport, SecurityScore, ScoreBreakdown } from "../types.js";
 import type { ScanResult } from "../scanner/index.js";
 import { detectDefenses } from "./defenses.js";
+import { redactSensitiveFinding } from "./redact.js";
 
 const SCORE_DEDUCTIONS: Record<string, number> = {
   critical: 25,
@@ -65,7 +66,8 @@ export function calculateScore(result: ScanResult): SecurityReport {
   return {
     timestamp: new Date().toISOString(),
     targetPath: target.path,
-    findings,
+    // Defense in depth: never emit a raw secret/PII value in fix metadata.
+    findings: findings.map(redactSensitiveFinding),
     score,
     summary,
     defenses,
@@ -193,7 +195,11 @@ function mapToScoreCategory(category: string): string {
     agents: "agents",
     injection: "agents",    // prompt injection → agents category
     exposure: "hooks",      // data exposure via hooks/exfiltration
+    exfiltration: "secrets", // outbound data loss → secrets/data-exposure
     misconfiguration: "permissions",  // config issues → permissions
+    pii: "secrets",         // personal data is data exposure
+    credentials: "secrets", // logins/passwords are data exposure
+    codes: "secrets",       // one-time codes are data exposure
   };
   return mapping[category] ?? "agents";
 }
