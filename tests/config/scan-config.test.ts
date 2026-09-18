@@ -43,6 +43,11 @@ describe("DEFAULT_SCAN_CONFIG", () => {
     expect(byExtension.get(".json")).toBe("config-generic");
   });
 
+  it("defines a bounded scan budget", () => {
+    expect(DEFAULT_SCAN_CONFIG.maxFiles).toBeGreaterThan(0);
+    expect(DEFAULT_SCAN_CONFIG.maxTotalBytes).toBeGreaterThan(0);
+  });
+
   it("registers OpenCode surfaces for discovery", () => {
     const paths = DEFAULT_SCAN_CONFIG.directories.map((rule) => rule.path);
     expect(paths).toContain(".opencode/agents");
@@ -109,6 +114,7 @@ describe("mergeAdditiveScanConfig", () => {
     const merged = mergeAdditiveScanConfig(DEFAULT_SCAN_CONFIG, {
       genericScan: false,
       ignoredDirs: ["secrets-dir"],
+      maxFiles: 1,
       directories: [
         { path: "skills", type: "unknown" },
         { path: "extra", type: "text-generic", recursive: true },
@@ -116,6 +122,7 @@ describe("mergeAdditiveScanConfig", () => {
     });
 
     expect(merged.genericScan).toBe(DEFAULT_SCAN_CONFIG.genericScan);
+    expect(merged.maxFiles).toBe(DEFAULT_SCAN_CONFIG.maxFiles);
     expect(merged.ignoredDirs).not.toContain("secrets-dir");
     expect(merged.directories.find((rule) => rule.path === "skills")?.type).toBe("skill-md");
     expect(merged.directories.some((rule) => rule.path === "extra")).toBe(true);

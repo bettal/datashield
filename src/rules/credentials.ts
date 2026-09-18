@@ -111,6 +111,12 @@ function isPlausibleCredentialValue(value: string, minLength: number): boolean {
   return true;
 }
 
+/** True when a login-like assignment appears shortly before `index`. */
+function hasNearbyLogin(content: string, index: number): boolean {
+  const window = content.slice(Math.max(0, index - 200), index);
+  return findAllMatches(window, LOGIN_ASSIGNMENT).length > 0;
+}
+
 function decodeBase64(value: string): string | null {
   try {
     const decoded = Buffer.from(value, "base64").toString("utf-8");
@@ -230,6 +236,10 @@ export const credentialRules: ReadonlyArray<Rule> = [
         const password = match[1];
         if (!COMMON_PASSWORDS.has(password.toLowerCase())) continue;
         if (isLikelyExampleValue(file, index)) continue;
+        // Do not duplicate a finding already produced by the quoted-password
+        // detection (secrets) or the login/password pair rule (credentials).
+        if (/["']/.test(match[0])) continue;
+        if (hasNearbyLogin(file.content, index)) continue;
 
         findings.push({
           id: `credentials-weak-password-${index}`,

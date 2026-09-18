@@ -321,7 +321,7 @@ describe("secretRules", () => {
     });
 
     it("skips non-text file types", () => {
-      const file = makeFile("API_KEY=real-secret-here-1234", "hook-code");
+      const file = makeFile("API_KEY=real-secret-here-1234", "unknown");
       const findings = runAllSecretRules(file);
       const claudeMdFindings = findings.filter((f) => f.id.includes("claude-md-env"));
       expect(claudeMdFindings).toHaveLength(0);
@@ -383,7 +383,7 @@ describe("secretRules", () => {
     });
 
     it("does not flag non-text files", () => {
-      const file: ConfigFile = { path: "hook.ts", type: "hook-code", content: "https://admin:pass@host.com" };
+      const file: ConfigFile = { path: "x.unknown", type: "unknown", content: "https://admin:pass@host.com" };
       const findings = runAllSecretRules(file);
       expect(findings.some((f) => f.id.includes("url-credentials"))).toBe(false);
     });
@@ -439,7 +439,7 @@ describe("secretRules", () => {
     });
 
     it("does not flag non-text files", () => {
-      const file: ConfigFile = { path: "hook.ts", type: "hook-code", content: "~/.aws/credentials" };
+      const file: ConfigFile = { path: "x.unknown", type: "unknown", content: "~/.aws/credentials" };
       const findings = runAllSecretRules(file);
       expect(findings.some((f) => f.id.includes("cred-file-ref"))).toBe(false);
     });

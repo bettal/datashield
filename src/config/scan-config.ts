@@ -106,6 +106,8 @@ const ScanConfigOverrideSchema = z
     extensions: z.array(ExtensionRuleSchema).optional(),
     genericScan: z.boolean().optional(),
     genericScanExamples: z.boolean().optional(),
+    maxFiles: z.number().int().positive().optional(),
+    maxTotalBytes: z.number().int().positive().optional(),
   })
   .strict();
 
@@ -119,6 +121,10 @@ export const ScanConfigSchema = z.object({
   extensions: z.array(ExtensionRuleSchema),
   genericScan: z.boolean(),
   genericScanExamples: z.boolean(),
+  /** Hard cap on the number of files read in one scan. */
+  maxFiles: z.number().int().positive(),
+  /** Hard cap on the total bytes read in one scan. */
+  maxTotalBytes: z.number().int().positive(),
 });
 
 export type DirectoryRule = z.infer<typeof DirectoryRuleSchema>;
@@ -305,6 +311,8 @@ export const DEFAULT_SCAN_CONFIG: ScanConfig = {
   extensions: [...DEFAULT_EXTENSIONS],
   genericScan: true,
   genericScanExamples: false,
+  maxFiles: 20_000,
+  maxTotalBytes: 100_000_000,
 };
 
 function addUnique(base: ReadonlyArray<string>, extra: ReadonlyArray<string>): string[] {
@@ -356,6 +364,8 @@ export function mergeScanConfig(base: ScanConfig, override: ScanConfigOverride):
     extensions: mergeByKey(base.extensions, override.extensions, (rule) => rule.extension),
     genericScan: override.genericScan ?? base.genericScan,
     genericScanExamples: override.genericScanExamples ?? base.genericScanExamples,
+    maxFiles: override.maxFiles ?? base.maxFiles,
+    maxTotalBytes: override.maxTotalBytes ?? base.maxTotalBytes,
   };
 }
 
@@ -376,6 +386,8 @@ export function mergeAdditiveScanConfig(base: ScanConfig, override: ScanConfigOv
     extensions: appendNewByKey(base.extensions, override.extensions, (rule) => rule.extension),
     genericScan: base.genericScan,
     genericScanExamples: base.genericScanExamples,
+    maxFiles: base.maxFiles,
+    maxTotalBytes: base.maxTotalBytes,
   };
 }
 
@@ -390,6 +402,8 @@ function cloneScanConfig(config: ScanConfig): ScanConfig {
     extensions: config.extensions.map((rule) => ({ ...rule })),
     genericScan: config.genericScan,
     genericScanExamples: config.genericScanExamples,
+    maxFiles: config.maxFiles,
+    maxTotalBytes: config.maxTotalBytes,
   };
 }
 

@@ -119,6 +119,25 @@ describe("discoverConfigFiles (config-driven)", () => {
     expect(result.files.some((file) => file.path.startsWith("node_modules/"))).toBe(false);
   });
 
+  it("stops at the configured file budget", () => {
+    const dir = createTempDir();
+    writeFileSync(join(dir, "a.md"), "# a");
+    writeFileSync(join(dir, "b.md"), "# b");
+    writeFileSync(join(dir, "c.md"), "# c");
+
+    const result = discoverConfigFiles(dir, { ...DEFAULT_SCAN_CONFIG, maxFiles: 1 });
+    expect(result.files).toHaveLength(1);
+  });
+
+  it("stops at the configured byte budget", () => {
+    const dir = createTempDir();
+    writeFileSync(join(dir, "a.md"), "x".repeat(100));
+    writeFileSync(join(dir, "b.md"), "y".repeat(100));
+
+    const result = discoverConfigFiles(dir, { ...DEFAULT_SCAN_CONFIG, maxTotalBytes: 10 });
+    expect(result.files).toHaveLength(0);
+  });
+
   it("accepts an explicit config object and does not read from disk", () => {
     const dir = createTempDir();
     writeFileSync(join(dir, "notes.md"), "# Notes");

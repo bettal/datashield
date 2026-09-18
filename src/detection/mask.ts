@@ -18,12 +18,3 @@ export function maskSensitive(value: string): string {
 
   return trimmed.slice(0, 8) + "..." + trimmed.slice(-4);
 }
-
-/**
- * Mask a substring inside a larger line while keeping the surrounding context
- * readable, e.g. `password = <redacted>`.
- */
-export function maskMatch(match: string, secret: string): string {
-  if (secret.length === 0) return match;
-  return match.replace(secret, maskSensitive(secret));
-}

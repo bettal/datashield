@@ -13695,7 +13695,9 @@ var ScanConfigOverrideSchema = external_exports.object({
   directories: external_exports.array(DirectoryRuleSchema).optional(),
   extensions: external_exports.array(ExtensionRuleSchema).optional(),
   genericScan: external_exports.boolean().optional(),
-  genericScanExamples: external_exports.boolean().optional()
+  genericScanExamples: external_exports.boolean().optional(),
+  maxFiles: external_exports.number().int().positive().optional(),
+  maxTotalBytes: external_exports.number().int().positive().optional()
 }).strict();
 var ScanConfigSchema = external_exports.object({
   version: external_exports.literal(1),
@@ -13706,7 +13708,11 @@ var ScanConfigSchema = external_exports.object({
   directories: external_exports.array(DirectoryRuleSchema),
   extensions: external_exports.array(ExtensionRuleSchema),
   genericScan: external_exports.boolean(),
-  genericScanExamples: external_exports.boolean()
+  genericScanExamples: external_exports.boolean(),
+  /** Hard cap on the number of files read in one scan. */
+  maxFiles: external_exports.number().int().positive(),
+  /** Hard cap on the total bytes read in one scan. */
+  maxTotalBytes: external_exports.number().int().positive()
 });
 var DEFAULT_IGNORED_DIRS = [
   ".dmux",
@@ -13862,7 +13868,9 @@ var DEFAULT_SCAN_CONFIG = {
   directories: [...DEFAULT_DIRECTORIES],
   extensions: [...DEFAULT_EXTENSIONS],
   genericScan: true,
-  genericScanExamples: false
+  genericScanExamples: false,
+  maxFiles: 2e4,
+  maxTotalBytes: 1e8
 };
 function addUnique(base, extra) {
   const seen = new Set(base);
@@ -13903,7 +13911,9 @@ function mergeScanConfig(base, override) {
     directories: mergeByKey(base.directories, override.directories, (rule) => rule.path),
     extensions: mergeByKey(base.extensions, override.extensions, (rule) => rule.extension),
     genericScan: override.genericScan ?? base.genericScan,
-    genericScanExamples: override.genericScanExamples ?? base.genericScanExamples
+    genericScanExamples: override.genericScanExamples ?? base.genericScanExamples,
+    maxFiles: override.maxFiles ?? base.maxFiles,
+    maxTotalBytes: override.maxTotalBytes ?? base.maxTotalBytes
   };
 }
 function mergeAdditiveScanConfig(base, override) {
@@ -13916,7 +13926,9 @@ function mergeAdditiveScanConfig(base, override) {
     directories: appendNewByKey(base.directories, override.directories, (rule) => rule.path),
     extensions: appendNewByKey(base.extensions, override.extensions, (rule) => rule.extension),
     genericScan: base.genericScan,
-    genericScanExamples: base.genericScanExamples
+    genericScanExamples: base.genericScanExamples,
+    maxFiles: base.maxFiles,
+    maxTotalBytes: base.maxTotalBytes
   };
 }
 function cloneScanConfig(config) {
@@ -13929,7 +13941,9 @@ function cloneScanConfig(config) {
     directories: config.directories.map((rule) => ({ ...rule })),
     extensions: config.extensions.map((rule) => ({ ...rule })),
     genericScan: config.genericScan,
-    genericScanExamples: config.genericScanExamples
+    genericScanExamples: config.genericScanExamples,
+    maxFiles: config.maxFiles,
+    maxTotalBytes: config.maxTotalBytes
   };
 }
 function resolveScanConfigSources(scanRoot, env = process.env) {
@@ -14051,7 +14065,10 @@ function buildDiscoveryEnv(config, realScanRoot) {
     ),
     realScanRoot,
     visitedConfiguredDirs: /* @__PURE__ */ new Set(),
-    visitedGenericDirs: /* @__PURE__ */ new Set()
+    visitedGenericDirs: /* @__PURE__ */ new Set(),
+    maxFiles: config.maxFiles,
+    maxTotalBytes: config.maxTotalBytes,
+    budget: { files: 0, bytes: 0 }
   };
 }
 function safeRealpath(path) {
@@ -14410,6 +14427,8 @@ function addDiscoveredFile(scanRoot, fullPath, type, files, seenFiles, env) {
   const relativePath = toPosixPath(relative(scanRoot, fullPath));
   if (relativePath.startsWith("..") || isAbsolute(relativePath)) return;
   if (seenFiles.has(relativePath)) return;
+  if (env.budget.files >= env.maxFiles) return;
+  if (env.budget.bytes >= env.maxTotalBytes) return;
   let realPath;
   try {
     realPath = realpathSync(fullPath);
@@ -14425,8 +14444,11 @@ function addDiscoveredFile(scanRoot, fullPath, type, files, seenFiles, env) {
   } catch {
     return;
   }
+  if (env.budget.bytes + content.length > env.maxTotalBytes) return;
   files.push({ path: relativePath, type, content });
   seenFiles.add(relativePath);
+  env.budget.files += 1;
+  env.budget.bytes += content.length;
 }
 
 // src/detection/entropy.ts
@@ -14592,22 +14614,26 @@ var TEXT_LIKE_FILE_TYPES = /* @__PURE__ */ new Set([
   "settings-json",
   "mcp-json",
   "codex-toml",
-  "hermes-yaml"
+  "hermes-yaml",
+  // Hook implementations are security-relevant surfaces too.
+  "hook-script",
+  "hook-code"
+]);
+var MARKDOWN_LIKE_FILE_TYPES = /* @__PURE__ */ new Set([
+  "claude-md",
+  "agent-md",
+  "skill-md",
+  "command-md",
+  "agents-md",
+  "rule-md",
+  "context-md",
+  "markdown-generic"
 ]);
 function isTextLikeFile(file) {
   return TEXT_LIKE_FILE_TYPES.has(file.type);
 }
 function isMarkdownLikeFile(file) {
-  return [
-    "claude-md",
-    "agent-md",
-    "skill-md",
-    "command-md",
-    "agents-md",
-    "rule-md",
-    "context-md",
-    "markdown-generic"
-  ].includes(file.type);
+  return MARKDOWN_LIKE_FILE_TYPES.has(file.type);
 }
 function isExampleLikePath2(file) {
   return isExampleLikePath(file.path);
@@ -14621,7 +14647,7 @@ function hasNearbyCodeFence(content, matchIndex) {
   const windowStart = Math.max(0, matchIndex - 800);
   const windowEnd = Math.min(content.length, matchIndex + 800);
   const window = content.slice(windowStart, windowEnd);
-  return /```|~~~~/.test(window);
+  return /```|~~~/.test(window);
 }
 function hasExampleOrTestContext(content, matchIndex) {
   const windowStart = Math.max(0, matchIndex - 1200);
@@ -15585,9 +15611,13 @@ function hasNearbyLabel(content, index, labels) {
     return pattern.test(window);
   });
 }
+var REDACTED_LOCAL_PATTERN = /x{3,}/i;
+var TOKEN_PREFIX_LOCAL_PATTERN = /^(?:gh[pousr]_|github_pat_|glpat-|sk-|pk_|sk_|xox|hf_|npm_)/i;
 function isPlaceholderEmail(email) {
   const [local, domain = ""] = email.toLowerCase().split("@");
   if (PLACEHOLDER_EMAIL_LOCALS.has(local)) return true;
+  if (REDACTED_LOCAL_PATTERN.test(local)) return true;
+  if (TOKEN_PREFIX_LOCAL_PATTERN.test(local)) return true;
   if (PLACEHOLDER_EMAIL_DOMAINS.some((placeholder) => domain.endsWith(placeholder))) return true;
   if (domain.split(".").some((label) => PLACEHOLDER_EMAIL_DOMAIN_LABELS.has(label))) return true;
   if (local === "git" && /^(?:github|gitlab|bitbucket)\.com$/.test(domain)) return true;
@@ -16045,6 +16075,10 @@ function isPlausibleCredentialValue(value, minLength) {
   if (CODE_KEYWORDS.has(value.toLowerCase())) return false;
   return true;
 }
+function hasNearbyLogin(content, index) {
+  const window = content.slice(Math.max(0, index - 200), index);
+  return findAllMatches2(window, LOGIN_ASSIGNMENT).length > 0;
+}
 function decodeBase64(value) {
   try {
     const decoded = Buffer.from(value, "base64").toString("utf-8");
@@ -16150,6 +16184,8 @@ var credentialRules = [
         const password = match[1];
         if (!COMMON_PASSWORDS.has(password.toLowerCase())) continue;
         if (isLikelyExampleValue(file, index)) continue;
+        if (/["']/.test(match[0])) continue;
+        if (hasNearbyLogin(file.content, index)) continue;
         findings.push({
           id: `credentials-weak-password-${index}`,
           severity: "medium",

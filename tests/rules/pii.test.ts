@@ -139,6 +139,6 @@ describe("pii file coverage", () => {
   });
 
   it("does not scan non-text files", () => {
-    expect(has(makeFile("email: john.doe@acme-corp.io", "hook-code", "hook.ts"), "pii-email")).toBe(false);
+    expect(has(makeFile("email: john.doe@acme-corp.io", "unknown", "x.unknown"), "pii-email")).toBe(false);
   });
 });

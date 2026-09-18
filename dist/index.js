@@ -122,7 +122,9 @@ function mergeScanConfig(base, override) {
     directories: mergeByKey(base.directories, override.directories, (rule) => rule.path),
     extensions: mergeByKey(base.extensions, override.extensions, (rule) => rule.extension),
     genericScan: override.genericScan ?? base.genericScan,
-    genericScanExamples: override.genericScanExamples ?? base.genericScanExamples
+    genericScanExamples: override.genericScanExamples ?? base.genericScanExamples,
+    maxFiles: override.maxFiles ?? base.maxFiles,
+    maxTotalBytes: override.maxTotalBytes ?? base.maxTotalBytes
   };
 }
 function mergeAdditiveScanConfig(base, override) {
@@ -135,7 +137,9 @@ function mergeAdditiveScanConfig(base, override) {
     directories: appendNewByKey(base.directories, override.directories, (rule) => rule.path),
     extensions: appendNewByKey(base.extensions, override.extensions, (rule) => rule.extension),
     genericScan: base.genericScan,
-    genericScanExamples: base.genericScanExamples
+    genericScanExamples: base.genericScanExamples,
+    maxFiles: base.maxFiles,
+    maxTotalBytes: base.maxTotalBytes
   };
 }
 function cloneScanConfig(config) {
@@ -148,7 +152,9 @@ function cloneScanConfig(config) {
     directories: config.directories.map((rule) => ({ ...rule })),
     extensions: config.extensions.map((rule) => ({ ...rule })),
     genericScan: config.genericScan,
-    genericScanExamples: config.genericScanExamples
+    genericScanExamples: config.genericScanExamples,
+    maxFiles: config.maxFiles,
+    maxTotalBytes: config.maxTotalBytes
   };
 }
 function resolveScanConfigSources(scanRoot, env = process.env) {
@@ -264,7 +270,9 @@ var init_scan_config = __esm({
       directories: z.array(DirectoryRuleSchema).optional(),
       extensions: z.array(ExtensionRuleSchema).optional(),
       genericScan: z.boolean().optional(),
-      genericScanExamples: z.boolean().optional()
+      genericScanExamples: z.boolean().optional(),
+      maxFiles: z.number().int().positive().optional(),
+      maxTotalBytes: z.number().int().positive().optional()
     }).strict();
     ScanConfigSchema = z.object({
       version: z.literal(1),
@@ -275,7 +283,11 @@ var init_scan_config = __esm({
       directories: z.array(DirectoryRuleSchema),
       extensions: z.array(ExtensionRuleSchema),
       genericScan: z.boolean(),
-      genericScanExamples: z.boolean()
+      genericScanExamples: z.boolean(),
+      /** Hard cap on the number of files read in one scan. */
+      maxFiles: z.number().int().positive(),
+      /** Hard cap on the total bytes read in one scan. */
+      maxTotalBytes: z.number().int().positive()
     });
     DEFAULT_IGNORED_DIRS = [
       ".dmux",
@@ -431,7 +443,9 @@ var init_scan_config = __esm({
       directories: [...DEFAULT_DIRECTORIES],
       extensions: [...DEFAULT_EXTENSIONS],
       genericScan: true,
-      genericScanExamples: false
+      genericScanExamples: false,
+      maxFiles: 2e4,
+      maxTotalBytes: 1e8
     };
     ScanConfigError = class extends Error {
       constructor(message) {
@@ -475,7 +489,10 @@ function buildDiscoveryEnv(config, realScanRoot) {
     ),
     realScanRoot,
     visitedConfiguredDirs: /* @__PURE__ */ new Set(),
-    visitedGenericDirs: /* @__PURE__ */ new Set()
+    visitedGenericDirs: /* @__PURE__ */ new Set(),
+    maxFiles: config.maxFiles,
+    maxTotalBytes: config.maxTotalBytes,
+    budget: { files: 0, bytes: 0 }
   };
 }
 function safeRealpath(path) {
@@ -833,6 +850,8 @@ function addDiscoveredFile(scanRoot, fullPath, type, files, seenFiles, env) {
   const relativePath = toPosixPath(relative(scanRoot, fullPath));
   if (relativePath.startsWith("..") || isAbsolute(relativePath)) return;
   if (seenFiles.has(relativePath)) return;
+  if (env.budget.files >= env.maxFiles) return;
+  if (env.budget.bytes >= env.maxTotalBytes) return;
   let realPath;
   try {
     realPath = realpathSync(fullPath);
@@ -848,8 +867,11 @@ function addDiscoveredFile(scanRoot, fullPath, type, files, seenFiles, env) {
   } catch {
     return;
   }
+  if (env.budget.bytes + content.length > env.maxTotalBytes) return;
   files.push({ path: relativePath, type, content });
   seenFiles.add(relativePath);
+  env.budget.files += 1;
+  env.budget.bytes += content.length;
 }
 var CLAUDE_RUNTIME_COMPANION_NAMES, HOOK_SHELL_EXTENSIONS, HOOK_CODE_EXTENSIONS, HOOK_IMPLEMENTATION_EXTENSIONS, PACKAGE_MANAGER_CONFIG_FILES, PROJECT_ROOT_HOOK_VARS, MAX_GENERIC_FILE_BYTES;
 var init_discovery = __esm({
@@ -1081,16 +1103,7 @@ function isTextLikeFile(file) {
   return TEXT_LIKE_FILE_TYPES.has(file.type);
 }
 function isMarkdownLikeFile(file) {
-  return [
-    "claude-md",
-    "agent-md",
-    "skill-md",
-    "command-md",
-    "agents-md",
-    "rule-md",
-    "context-md",
-    "markdown-generic"
-  ].includes(file.type);
+  return MARKDOWN_LIKE_FILE_TYPES.has(file.type);
 }
 function isExampleLikePath2(file) {
   return isExampleLikePath(file.path);
@@ -1104,7 +1117,7 @@ function hasNearbyCodeFence(content, matchIndex) {
   const windowStart = Math.max(0, matchIndex - 800);
   const windowEnd = Math.min(content.length, matchIndex + 800);
   const window = content.slice(windowStart, windowEnd);
-  return /```|~~~~/.test(window);
+  return /```|~~~/.test(window);
 }
 function hasExampleOrTestContext(content, matchIndex) {
   const windowStart = Math.max(0, matchIndex - 1200);
@@ -1130,7 +1143,7 @@ function isLikelyExampleValue(file, matchIndex) {
   if (!isExampleLikePath2(file)) return false;
   return isInsideCodeFence(file.content, matchIndex) || hasExampleOrTestContext(file.content, matchIndex);
 }
-var TEXT_LIKE_FILE_TYPES;
+var TEXT_LIKE_FILE_TYPES, MARKDOWN_LIKE_FILE_TYPES;
 var init_helpers = __esm({
   "src/rules/helpers.ts"() {
     "use strict";
@@ -1152,7 +1165,20 @@ var init_helpers = __esm({
       "settings-json",
       "mcp-json",
       "codex-toml",
-      "hermes-yaml"
+      "hermes-yaml",
+      // Hook implementations are security-relevant surfaces too.
+      "hook-script",
+      "hook-code"
+    ]);
+    MARKDOWN_LIKE_FILE_TYPES = /* @__PURE__ */ new Set([
+      "claude-md",
+      "agent-md",
+      "skill-md",
+      "command-md",
+      "agents-md",
+      "rule-md",
+      "context-md",
+      "markdown-generic"
     ]);
   }
 });
@@ -2071,6 +2097,8 @@ function hasNearbyLabel(content, index, labels) {
 function isPlaceholderEmail(email) {
   const [local, domain = ""] = email.toLowerCase().split("@");
   if (PLACEHOLDER_EMAIL_LOCALS.has(local)) return true;
+  if (REDACTED_LOCAL_PATTERN.test(local)) return true;
+  if (TOKEN_PREFIX_LOCAL_PATTERN.test(local)) return true;
   if (PLACEHOLDER_EMAIL_DOMAINS.some((placeholder) => domain.endsWith(placeholder))) return true;
   if (domain.split(".").some((label) => PLACEHOLDER_EMAIL_DOMAIN_LABELS.has(label))) return true;
   if (local === "git" && /^(?:github|gitlab|bitbucket)\.com$/.test(domain)) return true;
@@ -2088,7 +2116,7 @@ function makePiiFinding(input) {
     evidence: input.evidence
   };
 }
-var EMAIL_PATTERN, PLACEHOLDER_EMAIL_LOCALS, PLACEHOLDER_EMAIL_DOMAINS, PLACEHOLDER_EMAIL_DOMAIN_LABELS, piiRules;
+var EMAIL_PATTERN, PLACEHOLDER_EMAIL_LOCALS, PLACEHOLDER_EMAIL_DOMAINS, PLACEHOLDER_EMAIL_DOMAIN_LABELS, REDACTED_LOCAL_PATTERN, TOKEN_PREFIX_LOCAL_PATTERN, piiRules;
 var init_pii = __esm({
   "src/rules/pii.ts"() {
     "use strict";
@@ -2128,6 +2156,8 @@ var init_pii = __esm({
       "sample",
       "demo"
     ]);
+    REDACTED_LOCAL_PATTERN = /x{3,}/i;
+    TOKEN_PREFIX_LOCAL_PATTERN = /^(?:gh[pousr]_|github_pat_|glpat-|sk-|pk_|sk_|xox|hf_|npm_)/i;
     piiRules = [
       {
         id: "pii-email",
@@ -2495,6 +2525,10 @@ function isPlausibleCredentialValue(value, minLength) {
   if (CODE_KEYWORDS.has(value.toLowerCase())) return false;
   return true;
 }
+function hasNearbyLogin(content, index) {
+  const window = content.slice(Math.max(0, index - 200), index);
+  return findAllMatches2(window, LOGIN_ASSIGNMENT).length > 0;
+}
 function decodeBase64(value) {
   try {
     const decoded = Buffer.from(value, "base64").toString("utf-8");
@@ -2680,6 +2714,8 @@ var init_credentials = __esm({
             const password = match[1];
             if (!COMMON_PASSWORDS.has(password.toLowerCase())) continue;
             if (isLikelyExampleValue(file, index)) continue;
+            if (/["']/.test(match[0])) continue;
+            if (hasNearbyLogin(file.content, index)) continue;
             findings.push({
               id: `credentials-weak-password-${index}`,
               severity: "medium",

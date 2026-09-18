@@ -70,6 +70,6 @@ describe("codes file coverage", () => {
   });
 
   it("does not scan non-text files", () => {
-    expect(has(makeFile("otp = 123456", "hook-code", "hook.ts"), "codes-otp")).toBe(false);
+    expect(has(makeFile("otp = 123456", "unknown", "x.unknown"), "codes-otp")).toBe(false);
   });
 });

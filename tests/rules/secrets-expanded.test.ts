@@ -85,7 +85,7 @@ describe("generic secret assignment", () => {
   });
 
   it("does not scan non-text file types", () => {
-    const file = makeFile('api_key = "xJ8kL2mN9pQ4rS7tU1vW5yZ3aB6cD0eF"', "hook-code", "hook.ts");
+    const file = makeFile('api_key = "xJ8kL2mN9pQ4rS7tU1vW5yZ3aB6cD0eF"', "unknown", "x.unknown");
     expect(hasFinding(file, "generic-assignment")).toBe(false);
   });
 

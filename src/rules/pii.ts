@@ -79,9 +79,15 @@ function hasNearbyLabel(content: string, index: number, labels: ReadonlyArray<st
   });
 }
 
+const REDACTED_LOCAL_PATTERN = /x{3,}/i;
+const TOKEN_PREFIX_LOCAL_PATTERN = /^(?:gh[pousr]_|github_pat_|glpat-|sk-|pk_|sk_|xox|hf_|npm_)/i;
+
 function isPlaceholderEmail(email: string): boolean {
   const [local, domain = ""] = email.toLowerCase().split("@");
   if (PLACEHOLDER_EMAIL_LOCALS.has(local)) return true;
+  // Redacted/token-shaped locals, e.g. `ghp_xxxx@github.com` in a comment.
+  if (REDACTED_LOCAL_PATTERN.test(local)) return true;
+  if (TOKEN_PREFIX_LOCAL_PATTERN.test(local)) return true;
   if (PLACEHOLDER_EMAIL_DOMAINS.some((placeholder) => domain.endsWith(placeholder))) return true;
   if (domain.split(".").some((label) => PLACEHOLDER_EMAIL_DOMAIN_LABELS.has(label))) return true;
   // scp-like git remote, e.g. git@github.com:org/repo

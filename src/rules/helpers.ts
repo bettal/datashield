@@ -43,6 +43,20 @@ export const TEXT_LIKE_FILE_TYPES: ReadonlySet<ConfigFileType> = new Set([
   "mcp-json",
   "codex-toml",
   "hermes-yaml",
+  // Hook implementations are security-relevant surfaces too.
+  "hook-script",
+  "hook-code",
+]);
+
+const MARKDOWN_LIKE_FILE_TYPES: ReadonlySet<ConfigFileType> = new Set([
+  "claude-md",
+  "agent-md",
+  "skill-md",
+  "command-md",
+  "agents-md",
+  "rule-md",
+  "context-md",
+  "markdown-generic",
 ]);
 
 export function isTextLikeFile(file: ConfigFile): boolean {
@@ -50,16 +64,7 @@ export function isTextLikeFile(file: ConfigFile): boolean {
 }
 
 export function isMarkdownLikeFile(file: ConfigFile): boolean {
-  return [
-    "claude-md",
-    "agent-md",
-    "skill-md",
-    "command-md",
-    "agents-md",
-    "rule-md",
-    "context-md",
-    "markdown-generic",
-  ].includes(file.type);
+  return MARKDOWN_LIKE_FILE_TYPES.has(file.type);
 }
 
 export function isExampleLikePath(file: ConfigFile): boolean {
@@ -81,7 +86,7 @@ export function hasNearbyCodeFence(content: string, matchIndex: number): boolean
   const windowStart = Math.max(0, matchIndex - 800);
   const windowEnd = Math.min(content.length, matchIndex + 800);
   const window = content.slice(windowStart, windowEnd);
-  return /```|~~~~/.test(window);
+  return /```|~~~/.test(window);
 }
 
 export function hasExampleOrTestContext(content: string, matchIndex: number): boolean {

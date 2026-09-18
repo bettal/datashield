@@ -80,6 +80,11 @@ interface DiscoveryEnv {
   readonly visitedConfiguredDirs: Set<string>;
   /** Real directory paths already visited by the generic scan pass. */
   readonly visitedGenericDirs: Set<string>;
+  /** Total scan budget: hard caps to bound memory and runtime. */
+  readonly maxFiles: number;
+  readonly maxTotalBytes: number;
+  /** Mutable counters shared across the discovery passes. */
+  readonly budget: { files: number; bytes: number };
 }
 
 function buildDiscoveryEnv(config: ScanConfig, realScanRoot: string): DiscoveryEnv {
@@ -95,6 +100,9 @@ function buildDiscoveryEnv(config: ScanConfig, realScanRoot: string): DiscoveryE
     realScanRoot,
     visitedConfiguredDirs: new Set<string>(),
     visitedGenericDirs: new Set<string>(),
+    maxFiles: config.maxFiles,
+    maxTotalBytes: config.maxTotalBytes,
+    budget: { files: 0, bytes: 0 },
   };
 }
 
@@ -636,6 +644,10 @@ function addDiscoveredFile(
   if (relativePath.startsWith("..") || isAbsolute(relativePath)) return;
   if (seenFiles.has(relativePath)) return;
 
+  // Total scan budget: stop once the file count or byte budget is exhausted.
+  if (env.budget.files >= env.maxFiles) return;
+  if (env.budget.bytes >= env.maxTotalBytes) return;
+
   // Containment: never follow a symlink that resolves outside the scan root.
   let realPath: string;
   try {
@@ -656,6 +668,10 @@ function addDiscoveredFile(
     return;
   }
 
+  if (env.budget.bytes + content.length > env.maxTotalBytes) return;
+
   files.push({ path: relativePath, type, content });
   seenFiles.add(relativePath);
+  env.budget.files += 1;
+  env.budget.bytes += content.length;
 }

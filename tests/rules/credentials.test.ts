@@ -79,6 +79,14 @@ describe("weak passwords", () => {
   it("does not flag a strong password", () => {
     expect(has(makeFile("password=S3cretP@ss-9x"), "weak-password")).toBe(false);
   });
+
+  it("does not duplicate a quoted weak password already caught as hardcoded", () => {
+    expect(has(makeFile('password = "123456"'), "weak-password")).toBe(false);
+  });
+
+  it("does not duplicate a weak password already reported as a login/password pair", () => {
+    expect(has(makeFile("username = alice\npassword = 123456"), "weak-password")).toBe(false);
+  });
 });
 
 describe("credentials file coverage", () => {
@@ -88,7 +96,7 @@ describe("credentials file coverage", () => {
   });
 
   it("does not scan non-text files", () => {
-    const file = makeFile('username = "alice"\npassword = "S3cretP@ss"', "hook-code", "hook.ts");
+    const file = makeFile('username = "alice"\npassword = "S3cretP@ss"', "unknown", "x.unknown");
     expect(has(file, "login-password-pair")).toBe(false);
   });
 });
